@@ -1,6 +1,8 @@
 #include <genesis.h>
 #include "jazz_game.h"
 #include "jazz_gfx.h"
+#include "jj1_events.h"
+#include "jj1_runtime.h"
 #include "jj1_sounds.h"
 
 #define SCREEN_W 320
@@ -17,134 +19,6 @@ static s16 lastMapColumn;
 static u8 renderedStage;
 static u8 sfxTimer;
 
-static void jj1_runtime_data(u8 stage, const u8 **blocks, const u8 **masks, const u16 **startX, const u16 **startY)
-{
-    *blocks = jj1_level0_blocks;
-    *masks = jj1_level0_masks;
-    *startX = &jj1_level0_start_x;
-    *startY = &jj1_level0_start_y;
-    if (stage == 1) {
-        *blocks = jj1_level1_blocks;
-        *masks = jj1_level1_masks;
-        *startX = &jj1_level1_start_x;
-        *startY = &jj1_level1_start_y;
-    } else if (stage >= 2) {
-        *blocks = jj1_level2_blocks;
-        *masks = jj1_level2_masks;
-        *startX = &jj1_level2_start_x;
-        *startY = &jj1_level2_start_y;
-    }
-}
-
-/* Called by the platform-neutral game core when JAZZ_JJ1_RUNTIME is enabled.
- * JJ1 masks are 8x8 cells per 32x32 block. One bit therefore represents a
- * real 4x4-pixel collision cell, which is accurate enough for slopes/ramp
- * stepping without requiring per-pixel scans on a 7.67 MHz 68000. */
-static u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY)
-{
-    const u8 *events = jj1_level0_events;
-    if ((blockX < 0) || (blockX >= 256) || (blockY < 0) || (blockY >= 64)) return 0;
-    if (stage == 1) events = jj1_level1_events;
-    else if (stage >= 2) events = jj1_level2_events;
-    return events[(blockY * 256) + blockX];
-}
-
-static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
-{
-    const u8 *blocks;
-    const u8 *masks;
-    const u16 *startX;
-    const u16 *startY;
-    u8 block;
-    if ((cellX < 0) || (cellX >= (256 * 8)) || (cellY < 0) || (cellY >= (64 * 8))) return TRUE;
-    jj1_runtime_data(stage, &blocks, &masks, &startX, &startY);
-    /* Event 122 is JJ1's one-way platform: only feet moving downward land. */
-    if (!allowOneWay && (jj1_runtime_event(stage, cellX >> 3, cellY >> 3) == 122)) return FALSE;
-    block = blocks[((cellY >> 3) * 256) + (cellX >> 3)];
-    if (block >= 240) return FALSE;
-    return (masks[(block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? TRUE : FALSE;
-}
-
-u8 jj1_runtime_point_solid(u8 stage, s16 x, s16 y)
-{
-    return jj1_runtime_mask_cell(stage, x >> 2, y >> 2, FALSE);
-}
-
-u8 jj1_runtime_down_point_solid(u8 stage, s16 x, s16 y)
-{
-    return jj1_runtime_mask_cell(stage, x >> 2, y >> 2, TRUE);
-}
-
-u8 jj1_runtime_rect_solid(u8 stage, s16 x, s16 y, s16 w, s16 h)
-{
-    s16 cx, cy;
-    s16 cx0 = x >> 2;
-    s16 cx1 = (x + w - 1) >> 2;
-    s16 cy0 = y >> 2;
-    s16 cy1 = (y + h - 1) >> 2;
-    for (cy = cy0; cy <= cy1; cy++)
-        for (cx = cx0; cx <= cx1; cx++)
-            if (jj1_runtime_mask_cell(stage, cx, cy, FALSE)) return TRUE;
-    return FALSE;
-}
-
-u8 jj1_runtime_solid(u8 stage, s16 tx, s16 ty)
-{
-    return jj1_runtime_rect_solid(stage, tx << 4, ty << 4, 16, 16);
-}
-
-/* Original JJ1 spring event IDs share modifier 29; their source event
- * magnitudes are -15, -20 and -30. Convert to this port's px/frame scale. */
-s8 jj1_runtime_spring_velocity(u8 stage, s16 x, s16 y, s16 w, s16 h)
-{
-    s16 bx0 = x >> 5;
-    s16 bx1 = (x + w - 1) >> 5;
-    s16 by0 = y >> 5;
-    s16 by1 = (y + h - 1) >> 5;
-    s16 bx, by;
-    for (by = by0; by <= by1; by++) {
-        for (bx = bx0; bx <= bx1; bx++) {
-            u8 event = jj1_runtime_event(stage, bx, by);
-            if (event == 21) return -26;
-            if (event == 22) return -30;
-            if (event == 23) return -36;
-        }
-    }
-    return 0;
-}
-
-/* JJ1 stores a level jump-height parameter of -5 in this shareware set.
- * Converted to this engine's pixel/frame gravity scale it is -13 px/frame,
- * matching the original reachable one-way ledges. */
-s8 jj1_runtime_jump_velocity(u8 stage)
-{
-    (void) stage;
-    return -13;
-}
-
-void jj1_runtime_place_player(JazzGame *state, u8 stage)
-{
-    const u8 *blocks;
-    const u8 *masks;
-    const u16 *startX;
-    const u16 *startY;
-    jj1_runtime_data(stage, &blocks, &masks, &startX, &startY);
-    (void) blocks; (void) masks;
-    s16 spawnY;
-    state->player.x = ((s16) *startX << 5) + 8;
-    spawnY = ((s16) *startY << 5) - 22;
-    /* The JJ1 start record locates the spawn grid point; settle it against
-       the real mask so Jazz begins on the slope/platform rather than at a
-       prototype-grid height. */
-    while ((spawnY < ((64 * 32) - 23)) &&
-           !jj1_runtime_down_point_solid(stage, state->player.x + 2, spawnY + 22) &&
-           !jj1_runtime_down_point_solid(stage, state->player.x + 7, spawnY + 22) &&
-           !jj1_runtime_down_point_solid(stage, state->player.x + 11, spawnY + 22)) spawnY++;
-    state->player.y = spawnY;
-    state->player.vx = 0;
-    state->player.vy = 0;
-    state->player.onGround = TRUE;
-}
 
 static u16 input_from_pad(u16 pad)
 {
@@ -395,19 +269,25 @@ static void put_sprite(u16 *count, s16 x, s16 y, u8 size, u16 attr)
     }
 }
 
-static void render_jj1_springs(u16 *count)
+/* Springs and uncollected items are drawn straight from the original event
+ * grid within the visible 11x8 block window; the taken bitmap hides
+ * collected cells. */
+static void render_jj1_events(u16 *count)
 {
-    const u8 *events = jj1_level0_events;
     s16 sx, sy;
-    if (game.stage == 1) events = jj1_level1_events;
-    else if (game.stage >= 2) events = jj1_level2_events;
     for (sy = jj1MapOriginY; sy < jj1MapOriginY + 8; sy++) {
         for (sx = jj1MapOriginX; sx < jj1MapOriginX + 11; sx++) {
-            u8 event = events[(sy * 256) + sx];
-            if ((event == 21) || (event == 22) || (event == 23))
+            const Jj1EventInfo *info =
+                jj1_event_info(game.stage, jj1_runtime_event(game.stage, sx, sy));
+            if (info->klass == JJ1_CLASS_SPRING) {
                 put_sprite(count, (sx << 5) - cameraX, (sy << 5) - cameraY + 16,
                     SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
-                    T_SPRING + ((event - 21) * JJ1_SPRING_TILES_PER_VARIANT)));
+                    T_SPRING + (info->param * JJ1_SPRING_TILES_PER_VARIANT)));
+            } else if ((info->klass == JJ1_CLASS_ITEM) &&
+                       !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
+                put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
+                    SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, T_GEM));
+            }
         }
     }
 }
@@ -421,15 +301,15 @@ static void render_sprites(void)
         /* JJ1 MAINCHAR frame has a taller visual bounding box than the
            prototype 14x22 collision body; anchor its feet at the mask floor. */
         put_sprite(&count, game.player.x - cameraX - 8, game.player.y - cameraY + 10, SPRITE_SIZE(4, 4),
-                   TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
+                   TILE_ATTR_FULL(PAL1, TRUE, FALSE, !game.player.facing,
                    T_PLAYER + (((game.frame >> 3) & (JJ1_PLAYER_FRAME_COUNT - 1)) * JJ1_PLAYER_FRAME_TILES)));
-    render_jj1_springs(&count);
+    render_jj1_events(&count);
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++)
         if (game.enemies[i].active)
-            put_sprite(&count, game.enemies[i].x - cameraX, game.enemies[i].y - cameraY, SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, T_ENEMY));
-    for (i = 0; i < JAZZ_MAX_GEMS; i++)
-        if (game.gems[i].active)
-            put_sprite(&count, game.gems[i].x - cameraX, game.gems[i].y - cameraY, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, T_GEM));
+            put_sprite(&count, game.enemies[i].x - cameraX, game.enemies[i].y - cameraY,
+                SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL3, TRUE,
+                (game.enemies[i].direction < 0), FALSE,
+                T_ENEMY + ((game.enemies[i].klass == JJ1_CLASS_ENEMY_FLY) ? 2 : 0)));
     for (i = 0; i < JAZZ_MAX_BULLETS; i++)
         if (game.bullets[i].active)
             put_sprite(&count, game.bullets[i].x - cameraX, game.bullets[i].y - cameraY, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, T_BULLET));
@@ -526,10 +406,13 @@ static u8 run_target_point_to_point_tests(void)
        global game state: the Genesis user stack is intentionally only 512 B. */
     jazz_game_init(probe);
     if ((probe->lives != 3) || (probe->health != 5)) return 0;
-    if (!jazz_is_solid(probe, 0, 13)) return 0;
-    if (jazz_tile_at(probe, 92, 11) != JAZZ_TILE_EXIT) return 0;
+    /* The spawn settle must have found real mask ground under Jazz. */
+    if (!jj1_runtime_down_point_solid(probe->stage, probe->player.x + 7,
+                                      probe->player.y + 22)) return 0;
+    /* The original level must contain items and an end-of-level event. */
+    if (!probe->stageGemTotal) return 0;
     startX = probe->player.x;
-    jazz_step(probe, JAZZ_INPUT_RIGHT);
+    { u8 i; for (i = 0; i < 4; i++) jazz_step(probe, JAZZ_INPUT_RIGHT); }
     if (probe->player.x <= startX) return 0;
     return 1;
 }
