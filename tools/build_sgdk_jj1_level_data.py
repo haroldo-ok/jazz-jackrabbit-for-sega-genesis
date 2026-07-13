@@ -54,7 +54,7 @@ def array(name: str, ctype: str, values: list[int], per_line: int, fmt: str) -> 
     return "\n".join(lines)
 
 
-def runtime_records(level_path: Path) -> tuple[bytes, bytes, int, int]:
+def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int]:
     """Mirror JJ1Level::load record skips through mask/start-coordinate data."""
     r = Reader(level_path.read_bytes())
     r.seek(39)
@@ -62,7 +62,7 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, int, int]:
     r.skip_rle()                # transparency reference table
     masks = r.rle((60 * 4 + 16) * 8)
     r.rle(16 * 512)             # movement paths
-    r.rle(127 * 32)             # event definitions
+    eventset = r.rle(127 * 32)  # event definitions
     r.skip_rle()                # event names
     r.rle(128 * 64)             # animation definitions
     r.skip_rle()                # animation names
@@ -79,7 +79,66 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, int, int]:
     r.skip(39)                  # editor tileset names
     start_x = r.u16()
     start_y = r.u16() + 1
-    return grid, masks, start_x, start_y
+    return grid, masks, eventset, start_x, start_y
+
+
+# Genesis runtime classes (keep in sync with inc/jj1_events.h).
+CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
+    CLASS_SPRING, CLASS_ONEWAY, CLASS_END = range(8)
+ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO = range(5)
+
+
+def classify_event(record: bytes) -> tuple[int, int, int, int]:
+    """Map one original 32-byte event record to a (class, param, points/25,
+    strength) tuple, using the same rules the reference GPL engine applies:
+    modifier 0 with strength is an enemy, a scoring record is an item,
+    modifier 6 is a one-way platform, 27/8/41 end the level, 29 is an upward
+    spring, and hurting records that cannot be shot are static hazards."""
+    movement = record[4]
+    magnitude = record[8] if record[8] < 128 else record[8] - 256
+    strength = record[9]
+    modifier = record[10]
+    points = record[11]
+    if modifier == 6:
+        return CLASS_ONEWAY, 0, 0, 0
+    if modifier in (8, 27, 41):
+        return CLASS_END, 0, 0, 0
+    if modifier == 29:
+        # spring strength bucketed from launch magnitude
+        mag = -magnitude if magnitude < 0 else magnitude
+        return CLASS_SPRING, 0 if mag <= 16 else (1 if mag <= 24 else 2), 0, 0
+    if modifier == 0 and strength:
+        flying = movement in (6, 7, 25)
+        return (CLASS_ENEMY_FLY if flying else CLASS_ENEMY_WALK), 0, 0, min(strength, 255)
+    if modifier == 0 and not strength and points == 0 and movement in (37, 38):
+        return CLASS_NONE, 0, 0, 0
+    if points:
+        param = ITEM_SCORE
+        if modifier in (2, 3):
+            param = ITEM_HEALTH
+        elif modifier == 4:
+            param = ITEM_LIFE
+        elif modifier == 5:
+            param = ITEM_FASTFEET
+        elif modifier in (10, 11, 12):
+            param = ITEM_AMMO
+        return CLASS_ITEM, param, min((points * 10) // 25, 255), 0
+    if modifier == 0 and movement and movement < 37:
+        return CLASS_HAZARD, 0, 0, 0
+    return CLASS_NONE, 0, 0, 0
+
+
+def eventset_include(name: str, eventset: bytes) -> str:
+    lines = [
+        "/* Ground-truth event set generated from the original level file. */",
+        f"static const Jj1EventInfo {name}_eventset[128] = {{",
+    ]
+    for i in range(127):
+        klass, param, points, strength = classify_event(eventset[i * 32:(i + 1) * 32])
+        if klass or param or points or strength:
+            lines.append(f"    [{i + 1}] = {{ {klass}, {param}, {points}, {strength} }},")
+    lines.append("};")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -88,10 +147,12 @@ def main() -> None:
     ap.add_argument("--level", default="LEVEL0.000")
     ap.add_argument("--name", default="jj1_level0")
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--eventset", type=Path,
+                    help="also write a ground-truth jj1_levelN_eventset.inc")
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, start_x, start_y = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])
@@ -118,6 +179,10 @@ def main() -> None:
     code.append("};")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(code) + "\n")
+    if args.eventset:
+        args.eventset.parent.mkdir(parents=True, exist_ok=True)
+        args.eventset.write_text(eventset_include(args.name, eventset) + "\n")
+        print(f"Generated {args.eventset} from the original event records")
     print(f"Generated {args.output}: {len(blocks)} blocks, {len(words)//8} VDP tiles, masks, start {start_x},{start_y}")
 
 

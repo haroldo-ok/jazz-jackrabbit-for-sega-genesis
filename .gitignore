@@ -1,0 +1,9 @@
+# SGDK build output
+out/
+
+# Test scratch area (emulator core clone/build, intermediate ROMs, binaries)
+tests/.tmp/
+
+# Editor/OS noise
+*.swp
+.DS_Store

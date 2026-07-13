@@ -1,19 +1,29 @@
-# Jazz Jackrabbit — Genesis / Mega Drive SGDK prototype
+# Jazz Jackrabbit — Genesis / Mega Drive SGDK port (work in progress)
 
-A **working SGDK gameplay prototype** inspired by *Jazz Jackrabbit* and structured as a 68000 Genesis project. It produces a bootable `JazzJackrabbitGenesis.bin` ROM with a title screen, three short side-scrolling stages, run/jump/fire controls, enemies, pickups, HUD, health/lives, pause, exits, and an episode-complete state.
+An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a bootable `JazzJackrabbitGenesis.bin` ROM that plays the three converted shareware Diamondus levels with the original maps, collision masks, event grids, start positions, and a physics model matched to the original game (via the GPL OpenJazz reference engine).
 
-> **Current scope / legal status:** this is not yet a binary-compatible or asset-complete port of the original PC shareware release. The current build contains a **locally converted JJ1 pack** derived from the supplied shareware installation: eight original `MAINCHAR.000` Jazz animation frames, selected `BLOCKS.000` terrain patterns, three original `LEVEL0–2.000` / `BLOCKS.000` 10×7 background chunks, and original `SOUNDS.000` gun/jump/pickup effects. It does **not** include the raw installation/archive. OpenJazz is GPL-2.0-or-later and original game data remains subject to its own rights.
->
-> The remaining major gap is data-driven play: entity/event and three-stage progression rules are still bespoke. The asset catalog importer decodes every installed block set, sprite set, map, UI background/panel, font, and sound clip. The runtime now streams all three shareware `LEVEL0–2.000` 256×64 block grids, original 8×8 block collision masks, and original start coordinates through the same 88-block Genesis VRAM cache. A faithful port still requires JJ1 event tables, item/enemy animation mapping, music conversion, bosses, save data, and cutscene flow.
+> **Current scope / legal status:** the repository ships with a **locally converted JJ1 pack** derived from a user-supplied shareware installation: `MAINCHAR.000` Jazz animation frames, `BLOCKS.000` terrain patterns, all three `LEVEL0–2.000` 256×64 block grids with their 8×8 collision masks, event layers, and start records, plus `SOUNDS.000` gun/jump/pickup effects. It does **not** include the raw installation or archive. OpenJazz is GPL-2.0-or-later and original game data remains subject to its own rights. Additional episodes/levels require the corresponding original level files (see *Regenerating data* below).
 
-The runtime now renders the JJ1 maps on Plane A, uses the original block masks for 4×4-pixel collision probes, handles event 122 as a one-way platform, follows 4px ramp steps, and draws a JJ1-style gradient on Plane B. The original address-error shown in the supplied screenshot was corrected by:
+## What is implemented
 
-- linking SGDK's 68000-safe `libgcc.a` instead of a Linux-target `libgcc` that emitted 68020 `BSR.L` instructions;
-- disabling GCC's store-merging/vector store optimizations for target code;
-- preventing byte tile-map cells from being folded into unaligned word stores;
-- removing an unaligned stack-string initialization.
+- **Physics matched to the original model** in 8.8 fixed-point per frame: two-tier walk (2.50 px/f) / run (5.08 px/f) acceleration with distinct stop and turn decelerations; an 84 px target-height variable jump with a running-speed bonus, cut short by releasing the button or bonking a ceiling; gravity only while rising and the original's immediate terminal fall speed; 4 px mask ramp following.
+- **Data-driven entities from the original event grids**: items (score/health/extra-life), walking and flying enemies, static hazards, springs (button-independent relaunch of the same jump-ascent rule), one-way platforms, and end-of-level signs are all resolved through per-level event tables in `src/jj1_eventset.c`. A taken-bitmap makes items collect once and killed enemies stay dead; an 8-slot pool activates enemies near the player, scanning one grid column per frame to bound 68000 cost.
+- **Original rendering path**: streaming 88-block VRAM cache over the 256×64 maps on Plane A, sky gradient on Plane B, HUD, camera, springs and uncollected items drawn straight from the event grid.
+- **Three-stage episode flow** with exits, transitions, lives/health, pause, game over, and completion.
 
-The final ROM is **`JazzJackrabbitGenesis.bin`**.
+Platform-neutral logic lives in `src/game_core.c` + `src/jj1_runtime.c` and compiles unchanged on the host for testing and inside the ROM.
+
+## Regenerating data from a shareware installation
+
+The converter reads an installed shareware copy and emits the compiled-in includes, including ground-truth event tables that automatically override the provisional ones:
+
+```bash
+python3 tools/build_sgdk_jj1_level_data.py \
+  --input /path/to/jazz-install --level LEVEL0.000 --name jj1_level0 \
+  --output src/jj1_level0_data.inc --eventset src/jj1_level0_eventset.inc
+```
+
+Repeat per level. `src/jj1_eventset.c` picks up `jj1_levelN_eventset.inc` files automatically when present.
 
 ## Controls
 
@@ -122,3 +132,17 @@ The catalog command converts **every available** `BLOCKS.*` set, `SPRITES.*` set
 - Original shareware installer: <https://www.classicdosgames.com/files/games/epic/1jazz13.zip>
 - OpenJazz source port (GPL-2.0-or-later): <https://github.com/AlisterT/openjazz>
 - SGDK: <https://github.com/Stephane-D/SGDK>
+
+## Testing
+
+```bash
+tests/run_all.sh          # everything below
+tests/run_host_tests.sh   # host point-to-point simulation tests
+GDK=/path/to/sgdk tests/run_headless_emulator_test.sh
+```
+
+- The **host suite** compiles the exact game core, JJ1 runtime, and converted level data with a native compiler and asserts point-to-point behaviour: spawn settling on the original masks of all three levels, walk/run speed tiers, the 84 px variable jump, immediate terminal fall, item collection with the taken bitmap, enemy activation/kill/no-respawn, contact damage and invulnerability, spring launch heights, end-sign exits, and full episode completion.
+- The **headless emulator suite** needs no display: it builds the Genesis Plus GX libretro core, runs a `-DJAZZ_AUTOTEST` ROM whose 68000-side assertions report through an SRAM marker, then scripts a title → START → run/jump playthrough of the release ROM and asserts framebuffer pixels (title text, Jazz sprite, sky, converted terrain, advancing animation, camera scrolling, live HUD). Screenshots land in `tests/artifacts/`.
+- `tests/run_emulator_test.sh` remains as an optional X-based BlastEm variant.
+
+See `TEST_REPORT.md` for the latest results and remaining gaps (original sprite/animation mapping, music, bosses, warps, and additional worlds pending their level files).
