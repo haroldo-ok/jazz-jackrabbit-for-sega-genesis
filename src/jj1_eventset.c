@@ -33,17 +33,33 @@
 #define EV_WALKER          { JJ1_CLASS_ENEMY_WALK, 0, 0, 1 }
 #define EV_FLYER           { JJ1_CLASS_ENEMY_FLY, 0, 0, 1 }
 #define EV_HAZARD          { JJ1_CLASS_HAZARD, 0, 0, 0 }
-#define EV_SPRING(n)       { JJ1_CLASS_SPRING, (n), 0, 0 }
+/* Spring param is the absolute launch magnitude: the engine rises to
+ * magnitude * 21 px above the spring block.  These provisional values are
+ * derived from the converted masks: for each ID, the highest platform that
+ * is actually landable from any of its placements (i.e. below the ceiling
+ * over that spring), plus one step of margin.  Regenerated eventset includes
+ * override these with the original per-level magnitudes. */
+#define EV_SPRING(magnitude) { JJ1_CLASS_SPRING, (magnitude), 0, 0 }
 #define EV_ONEWAY          { JJ1_CLASS_ONEWAY, 0, 0, 0 }
+/* Destructible scenery (JJ1 behaviour 21): solid until it has taken `shots`
+ * hits, then the block is swapped out and the space opens up.  The original
+ * strength comes from the event record, so 1 is a provisional default. */
+#define EV_DESTRUCT(shots) { JJ1_CLASS_DESTRUCT, 0, 0, (shots) }
 #define EV_END             { JJ1_CLASS_END, 0, 0, 0 }
 
 /* Diamondus set shared by LEVEL0.000 and LEVEL1.000. */
 static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [1]  = EV_FLYER,     /* sparse, half airborne: hopping/flying enemy   */
     [2]  = EV_WALKER,    /* always grounded, spread across the level      */
-    [3]  = EV_HAZARD,    /* clustered strips, mostly airborne             */
-    [4]  = EV_HAZARD,
-    [5]  = EV_HAZARD,
+    /* 3/4/5 lie in horizontal trails (66-100% have a same-ID neighbour) and
+       never sit inside terrain: that is the shape of a pickup run (carrots,
+       fast-fire, ammo), not a hazard strip.  They were classified as hazards,
+       which is why collecting a carrot or a rapid-fire hurt.  Items never
+       damage; the exact kind of each needs the original records, so they
+       score for now. */
+    [3]  = EV_FOOD,
+    [4]  = EV_FOOD,
+    [5]  = EV_FOOD,
     [6]  = EV_FLYER,     /* never grounded, isolated placements           */
     [7]  = EV_END,       /* single sign at the end of the route           */
     [8]  = EV_FLYER,
@@ -52,14 +68,14 @@ static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [11] = EV_WALKER,
     [13] = EV_CARROT,    /* grounded singles along the route              */
     [14] = EV_AMMO,      /* grounded, short rows                          */
-    [15] = EV_FOOD,
+    [15] = EV_DESTRUCT(1),  /* short runs buried in solid rock: wooden sign */
     [16] = EV_FOOD,
     [17] = EV_FOOD,
     [19] = EV_GEM,       /* grounded gem                                  */
     [20] = EV_GEM,       /* airborne gem rows/arcs                        */
-    [21] = EV_SPRING(0),
-    [22] = EV_SPRING(1),
-    [23] = EV_SPRING(2),
+    [21] = EV_SPRING(12),  /* clears its highest landable ledge: 224 px */
+    [22] = EV_SPRING(12),  /* clears its highest landable ledge: 224 px */
+    [23] = EV_SPRING(11),  /* clears its highest landable ledge: 192 px */
     [24] = EV_LIFE,
     [25] = EV_FOOD,
     [26] = EV_FOOD,
@@ -71,7 +87,11 @@ static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [34] = EV_FOOD,
     [35] = EV_WALKER,
     [122] = EV_ONEWAY,
-    /* 123/124/125: large scenery regions in the original maps.           */
+    /* 123 is decorative background (344 cells, never inside terrain).
+       124/125 sit INSIDE solid rock (41-79%) in long runs (67-96% have a
+       same-ID neighbour): those are the destructible walls. */
+    [124] = EV_DESTRUCT(1),
+    [125] = EV_DESTRUCT(1),
 };
 
 /* LEVEL2.000 set. */
@@ -81,7 +101,10 @@ static const Jj1EventInfo jj1_eventset_level2[128] = {
     [11] = EV_WALKER,
     [14] = EV_AMMO,
     [20] = EV_GEM,
-    [23] = EV_SPRING(2),
+    [23] = EV_SPRING(6),   /* clears its highest landable ledge:  96 px */
+    [15] = EV_DESTRUCT(1),
+    [124] = EV_DESTRUCT(1),
+    [125] = EV_DESTRUCT(1),
     [24] = EV_LIFE,
     [28] = EV_FOOD,
     [35] = EV_FLYER,

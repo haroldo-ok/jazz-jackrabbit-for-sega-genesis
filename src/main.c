@@ -17,6 +17,9 @@ static s16 cameraX;
 static s16 cameraY;
 static s16 lastMapColumn;
 static u8 renderedStage;
+static u16 renderedDestroyCount;
+static u8 selectedStage;   /* level select on the title screen */
+static u16 titlePreviousPad;
 static u8 sfxTimer;
 
 
@@ -42,6 +45,33 @@ static void number_to_text(char *out, u16 value)
     out[count] = 0;
 }
 
+/* The HUD lives on the window plane over the top two rows, and this runs
+ * right after vblank - i.e. while the beam is drawing exactly those rows.
+ * Clearing and rewriting them every frame therefore raced the raster: when
+ * a streamed block column delayed the redraw, the beam passed rows 0-1 while
+ * they were still blank and the HUD flickered out. So: never clear, build
+ * fixed-width space-padded lines, and only touch VRAM when a line actually
+ * changes (score/gems/health move rarely, so the window is stable). */
+static char hudShown[2][41];
+
+static void hud_pad(char *line, u8 pos)
+{
+    while (pos < 40) line[pos++] = ' ';
+    line[40] = 0;
+}
+
+static void hud_commit(u8 row, const char *line)
+{
+    u8 i;
+    for (i = 0; i < 41; i++) {
+        if (hudShown[row][i] == line[i]) continue;
+        /* Content changed: rewrite this row once and remember it. */
+        for (i = 0; i < 41; i++) hudShown[row][i] = line[i];
+        VDP_drawTextBG(WINDOW, line, 0, row);
+        return;
+    }
+}
+
 static void draw_status_line(const JazzGame *g)
 {
     char line[41];
@@ -52,7 +82,6 @@ static void draw_status_line(const JazzGame *g)
     const char *gems = "  GEMS ";
     const char *score = "  SCORE ";
 
-    VDP_clearTextAreaBG(WINDOW, 0, 0, 40, 2);
     while (*prefix) line[pos++] = *prefix++;
     number_to_text(number, g->lives); for (i = 0; number[i]; i++) line[pos++] = number[i];
     while (*gems) line[pos++] = *gems++;
@@ -60,20 +89,40 @@ static void draw_status_line(const JazzGame *g)
     line[pos++] = '/'; number_to_text(number, g->stageGemTotal); for (i = 0; number[i]; i++) line[pos++] = number[i];
     while (*score) line[pos++] = *score++;
     number_to_text(number, g->score); for (i = 0; number[i]; i++) line[pos++] = number[i];
-    line[pos] = 0;
-    VDP_drawTextBG(WINDOW, line, 0, 0);
+    hud_pad(line, pos);
+    hud_commit(0, line);
 
-    if (g->paused) VDP_drawTextBG(WINDOW, "PAUSED - START RESUMES", 8, 1);
-    else if (g->transitionTimer) VDP_drawTextBG(WINDOW, "EXIT FOUND!", 14, 1);
-    else {
+    pos = 0;
+    if (g->paused) {
+        const char *text = "        PAUSED - START RESUMES";
+        while (*text) line[pos++] = *text++;
+    } else if (g->transitionTimer) {
+        const char *text = "              EXIT FOUND!";
+        while (*text) line[pos++] = *text++;
+    } else {
         /* Keep text as ROM literals. A 68000 traps on the unaligned long
            stores that recent GCC can otherwise use for a stack string. */
         static const char *const healthText[6] = {
-            "HP:", "HP:*", "HP:**", "HP:***", "HP:****", "HP:*****"
+            "HP:      ", "HP:*     ", "HP:**    ",
+            "HP:***   ", "HP:****  ", "HP:***** "
         };
-        VDP_drawTextBG(WINDOW, healthText[g->health], 0, 1);
-        VDP_drawTextBG(WINDOW, "A FIRE  B/C JUMP  START PAUSE", 10, 1);
+        const char *text = healthText[(g->health < 6) ? g->health : 5];
+        const char *keys = " A FIRE  B/C JUMP  START PAUSE";
+        while (*text) line[pos++] = *text++;
+        while (*keys) line[pos++] = *keys++;
     }
+    hud_pad(line, pos);
+    hud_commit(1, line);
+}
+
+/* Force both rows to be re-sent after the window contents are destroyed
+ * (title/end screens repaint the whole window plane). */
+static void hud_invalidate(void)
+{
+    hudShown[0][0] = 0;
+    hudShown[1][0] = 0;
+    hudShown[0][1] = 1; /* differs from any real padded line */
+    hudShown[1][1] = 1;
 }
 
 
@@ -141,6 +190,9 @@ static void draw_jj1_block(s16 sourceX, s16 sourceY)
     u16 baseTile;
     if ((sourceX < 0) || (sourceX >= 256) || (sourceY < 0) || (sourceY >= 64)) return;
     sourceBlock = jj1ActiveBlocks[(sourceY * 256) + sourceX];
+    /* A destructible that has been shot away shows the backdrop through it,
+       matching the engine swapping the block out (setTile). */
+    if (jazz_cell_destroyed(&game, (u8)sourceX, (u8)sourceY)) sourceBlock = 0;
     baseTile = T_JJ1_BLOCK_CACHE + (cache_jj1_block(sourceBlock) * JJ1_BLOCK_TILE_COUNT);
     for (ty = 0; ty < 4; ty++)
         for (tx = 0; tx < 4; tx++)
@@ -228,7 +280,9 @@ static void load_video_assets(void)
     VDP_loadTileData(jazz_world_tiles, T_EMPTY, 7, DMA);
     VDP_loadTileData(jazz_player_tiles, T_PLAYER, JJ1_PLAYER_FRAME_COUNT * JJ1_PLAYER_FRAME_TILES, DMA);
     VDP_loadTileData(jazz_spring_tiles, T_SPRING, JJ1_SPRING_VARIANTS * JJ1_SPRING_TILES_PER_VARIANT, DMA);
-    VDP_loadTileData(jazz_enemy_tiles, T_ENEMY, 4, DMA);
+    VDP_loadTileData(jazz_enemy_walker_tiles, T_ENEMY_WALK, 2 * JJ1_WALKER_FRAME_TILES, DMA);
+    VDP_loadTileData(jazz_enemy_flyer_tiles, T_ENEMY_FLY, 2 * JJ1_FLYER_FRAME_TILES, DMA);
+    VDP_loadTileData(jazz_enemy_hazard_tiles, T_ENEMY_HAZARD, 4, DMA);
     VDP_loadTileData(jazz_gem_tile, T_GEM, 1, DMA);
     VDP_loadTileData(jazz_bullet_tile, T_BULLET, 1, DMA);
     VDP_loadTileData(jj1_sky_tiles, T_JJ1_SKY, 8, DMA);
@@ -241,6 +295,25 @@ static void load_video_assets(void)
     PSG_reset();
 }
 
+/* Follow the player with lag proportional to the distance, as the original
+ * does (it lerps the viewport toward the player by a fraction each tick).
+ * The previous code moved the camera by at most 3 px per frame, but Jazz runs
+ * at over 5 px per frame: the camera could never keep up, so it fell behind
+ * and then lurched forward, which read as jittery back-and-forth scrolling.
+ * Vertically it was worse - a 45-degree mask ramp moves the player 4-6 px per
+ * frame, so the capped camera climbed in visible chunks and made smooth slopes
+ * look like stairs.  A proportional step has no speed ceiling: at a constant
+ * player speed it settles into a constant lag and then tracks exactly. */
+static s16 camera_follow(s16 camera, s16 wanted)
+{
+    s16 delta = wanted - camera;
+    s16 step;
+    if (!delta) return camera;
+    step = delta >> 2;
+    if (!step) step = (delta > 0) ? 1 : -1;  /* always converge the last few px */
+    return (s16)(camera + step);
+}
+
 static void update_camera_and_map(void)
 {
     s16 wantedX = game.player.x - 150;
@@ -249,12 +322,8 @@ static void update_camera_and_map(void)
     if (wantedY < 0) wantedY = 0;
     if (wantedX > ((256 * 32) - SCREEN_W)) wantedX = (256 * 32) - SCREEN_W;
     if (wantedY > ((64 * 32) - 224)) wantedY = (64 * 32) - 224;
-    /* Damped camera prevents a single 4px mask-cell correction from producing
-       a full 32px cache-origin redraw in the opposite direction. */
-    if (cameraX < wantedX) cameraX += (wantedX - cameraX > 3) ? 3 : wantedX - cameraX;
-    else if (cameraX > wantedX) cameraX -= (cameraX - wantedX > 3) ? 3 : cameraX - wantedX;
-    if (cameraY < wantedY) cameraY += (wantedY - cameraY > 3) ? 3 : wantedY - cameraY;
-    else if (cameraY > wantedY) cameraY -= (cameraY - wantedY > 3) ? 3 : cameraY - wantedY;
+    cameraX = camera_follow(cameraX, wantedX);
+    cameraY = camera_follow(cameraY, wantedY);
     render_jj1_map(cameraX >> 5, cameraY >> 5);
     VDP_setHorizontalScroll(BG_A, -cameraX);
     VDP_setVerticalScroll(BG_A, cameraY);
@@ -280,13 +349,16 @@ static void render_jj1_events(u16 *count)
             const Jj1EventInfo *info =
                 jj1_event_info(game.stage, jj1_runtime_event(game.stage, sx, sy));
             if (info->klass == JJ1_CLASS_SPRING) {
+                /* param carries the launch magnitude; bucket it into the
+                   three visual strengths. */
+                u16 variant = (info->param >= 12) ? 2 : ((info->param >= 9) ? 1 : 0);
                 put_sprite(count, (sx << 5) - cameraX, (sy << 5) - cameraY + 16,
                     SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
-                    T_SPRING + (info->param * JJ1_SPRING_TILES_PER_VARIANT)));
+                    T_SPRING + (variant * JJ1_SPRING_TILES_PER_VARIANT)));
             } else if ((info->klass == JJ1_CLASS_ITEM) &&
                        !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
                 put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
-                    SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, T_GEM));
+                    SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
             }
         }
     }
@@ -298,21 +370,35 @@ static void render_sprites(void)
     u8 i;
     VDP_resetSprites();
     if (!(game.invulnerability && (game.frame & 4)))
-        /* JJ1 MAINCHAR frame has a taller visual bounding box than the
-           prototype 14x22 collision body; anchor its feet at the mask floor. */
-        put_sprite(&count, game.player.x - cameraX - 8, game.player.y - cameraY + 10, SPRITE_SIZE(4, 4),
+        /* The 32px MAINCHAR frames have their visible feet on the bottom
+           row, so align the frame bottom with the 22px collision body's
+           floor: draw at y + PLAYER_H - 32 = y - 10. */
+        put_sprite(&count, game.player.x - cameraX - 8, game.player.y - cameraY - 10, SPRITE_SIZE(4, 4),
                    TILE_ATTR_FULL(PAL1, TRUE, FALSE, !game.player.facing,
                    T_PLAYER + (((game.frame >> 3) & (JJ1_PLAYER_FRAME_COUNT - 1)) * JJ1_PLAYER_FRAME_TILES)));
     render_jj1_events(&count);
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++)
-        if (game.enemies[i].active)
-            put_sprite(&count, game.enemies[i].x - cameraX, game.enemies[i].y - cameraY,
-                SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL3, TRUE,
-                (game.enemies[i].direction < 0), FALSE,
-                T_ENEMY + ((game.enemies[i].klass == JJ1_CLASS_ENEMY_FLY) ? 2 : 0)));
+        if (game.enemies[i].active) {
+            u8 anim = (game.frame >> 3) & 1;
+            if (game.enemies[i].klass == JJ1_CLASS_ENEMY_WALK)
+                /* 32x16 frame over the centred 14x16 body, feet aligned. */
+                put_sprite(&count, game.enemies[i].x - cameraX - 9, game.enemies[i].y - cameraY,
+                    SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE,
+                    (game.enemies[i].direction < 0),
+                    T_ENEMY_WALK + (anim * JJ1_WALKER_FRAME_TILES)));
+            else if (game.enemies[i].klass == JJ1_CLASS_ENEMY_FLY)
+                put_sprite(&count, game.enemies[i].x - cameraX - 1, game.enemies[i].y - cameraY,
+                    SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE,
+                    (game.enemies[i].direction < 0),
+                    T_ENEMY_FLY + (anim * JJ1_FLYER_FRAME_TILES)));
+            else
+                put_sprite(&count, game.enemies[i].x - cameraX - 1, game.enemies[i].y - cameraY,
+                    SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
+                    T_ENEMY_HAZARD));
+        }
     for (i = 0; i < JAZZ_MAX_BULLETS; i++)
         if (game.bullets[i].active)
-            put_sprite(&count, game.bullets[i].x - cameraX, game.bullets[i].y - cameraY, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, T_BULLET));
+            put_sprite(&count, game.bullets[i].x - cameraX, game.bullets[i].y - cameraY, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_BULLET));
     if (count) {
         VDP_setSpriteLink(count - 1, 0);
         VDP_updateSprites(count, DMA);
@@ -341,13 +427,32 @@ static void update_sfx(void)
 static void begin_play(void)
 {
     jazz_game_init(&game);
+    /* Level select: start on the stage chosen on the title screen. */
+    if (selectedStage) jazz_debug_set_stage(&game, selectedStage);
     game.previousInput = JAZZ_INPUT_START;
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
+    hud_invalidate();
     render_backdrop(game.stage);
     render_level_map();
     renderedStage = game.stage;
+    renderedDestroyCount = game.destroyCount;
     mode = MODE_PLAY;
+}
+
+/* Level select: UP/DOWN on the title screen pick the starting stage, which
+ * makes it possible to debug a later level without playing through to it. */
+static void draw_level_select(void)
+{
+    char line[24];
+    /*                 0123456789..           digit sits at index 11 */
+    const char *label = "LEVEL:  <  1  >   ";
+    u8 i;
+    for (i = 0; label[i]; i++) line[i] = label[i];
+    line[11] = (char)('1' + selectedStage);
+    line[i] = 0;
+    VDP_drawTextBG(WINDOW, line, 11, 16);
+    VDP_drawTextBG(WINDOW, "UP/DOWN: SELECT LEVEL", 9, 19);
 }
 
 static void show_title(void)
@@ -364,6 +469,7 @@ static void show_title(void)
     VDP_drawTextBG(WINDOW, "D-PAD RUN    A FIRE", 10, 21);
     VDP_drawTextBG(WINDOW, "B OR C JUMP  START PAUSE", 6, 23);
     VDP_drawTextBG(WINDOW, "JJ1 SHAREWARE ASSET BUILD", 7, 26);
+    draw_level_select();
     VDP_clearSprites();
     mode = MODE_TITLE;
 }
@@ -387,6 +493,10 @@ static void run_play_frame(u16 input)
         renderedStage = game.stage;
     }
     update_camera_and_map();
+    if (game.destroyCount != renderedDestroyCount) {
+        draw_jj1_block(game.destroyedX, game.destroyedY);
+        renderedDestroyCount = game.destroyCount;
+    }
     draw_status_line(&game);
     render_sprites();
     update_sfx();
@@ -453,6 +563,15 @@ int main(bool hardReset)
     while (TRUE) {
         pad = JOY_readJoypad(JOY_1);
         if (mode == MODE_TITLE) {
+            u16 pressed = (u16)(pad & ~titlePreviousPad);
+            if ((pressed & BUTTON_UP) && (selectedStage + 1 < JAZZ_STAGE_COUNT)) {
+                selectedStage++;
+                draw_level_select();
+            } else if ((pressed & BUTTON_DOWN) && selectedStage) {
+                selectedStage--;
+                draw_level_select();
+            }
+            titlePreviousPad = pad;
             if (pad & BUTTON_START) begin_play();
         } else if (mode == MODE_PLAY) {
             run_play_frame(input_from_pad(pad));

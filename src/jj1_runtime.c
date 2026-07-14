@@ -88,13 +88,13 @@ u8 jj1_runtime_solid(u8 stage, s16 tx, s16 ty)
 }
 
 /* Upward springs share JJ1 modifier 29.  As in the original engine a spring
- * does not set a velocity directly: it retargets the jump ascent to a
- * per-strength height above the spring block, and the shared ascent rule
- * (see game_core.c) produces the launch arc.  Returns the target height in
- * pixels above the spring block, or 0. */
+ * does not set a velocity directly: it retargets the jump ascent so the
+ * player's FEET rise to |magnitude| * 21 pixels above the spring block, and
+ * the shared ascent rule (see game_core.c) produces the launch arc.  The
+ * event's param carries the absolute magnitude.  Returns the target feet
+ * height in pixels above the spring block, or 0. */
 u16 jj1_runtime_spring_height(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *springTopY)
 {
-    static const u16 heights[3] = { 106, 138, 178 };
     s16 bx0 = x >> 5;
     s16 bx1 = (x + w - 1) >> 5;
     s16 by0 = y >> 5;
@@ -105,7 +105,7 @@ u16 jj1_runtime_spring_height(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *springT
             const Jj1EventInfo *info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
             if (info->klass == JJ1_CLASS_SPRING) {
                 if (springTopY) *springTopY = by << 5;
-                return heights[(info->param < 3) ? info->param : 2];
+                return (u16)info->param * 21;
             }
         }
     }

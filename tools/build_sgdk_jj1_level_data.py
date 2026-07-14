@@ -84,7 +84,7 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int]:
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
 CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
-    CLASS_SPRING, CLASS_ONEWAY, CLASS_END = range(8)
+    CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT = range(9)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO = range(5)
 
 
@@ -104,9 +104,18 @@ def classify_event(record: bytes) -> tuple[int, int, int, int]:
     if modifier in (8, 27, 41):
         return CLASS_END, 0, 0, 0
     if modifier == 29:
-        # spring strength bucketed from launch magnitude
+        # Upward spring: the engine rises to |magnitude| * 21 px above the
+        # spring block, so param carries the absolute magnitude directly.
         mag = -magnitude if magnitude < 0 else magnitude
-        return CLASS_SPRING, 0 if mag <= 16 else (1 if mag <= 24 else 2), 0, 0
+        return CLASS_SPRING, min(mag, 255), 0, 0
+    if movement == 21:
+        # Destructible block/sign: the engine counts hits against the event and
+        # swaps the block once they reach `strength` (setTile to multiA).
+        # Modifier 7 marks these as "must not destroy/hurt on contact".
+        return CLASS_DESTRUCT, 0, 0, max(1, min(strength, 255))
+    if modifier == 7:
+        # Used with destructible blocks; harmless on contact.
+        return CLASS_NONE, 0, 0, 0
     if modifier == 0 and strength:
         flying = movement in (6, 7, 25)
         return (CLASS_ENEMY_FLY if flying else CLASS_ENEMY_WALK), 0, 0, min(strength, 255)

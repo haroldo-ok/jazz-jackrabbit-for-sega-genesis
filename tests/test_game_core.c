@@ -23,6 +23,17 @@ static void step_n(JazzGame *g, u16 input, int n)
 
 /* Find the first grid cell of a class in a level, scanning column-major so
  * "first" means leftmost. Returns 1 and fills gx/gy on success. */
+
+/* Solidity as the running game sees it, i.e. honouring destroyed blocks. */
+static u8 rect_solid_at(const JazzGame *g, s16 x, s16 y)
+{
+    s16 tx, ty;
+    for (ty = y; ty < y + 32; ty += 16)
+        for (tx = x; tx < x + 32; tx += 16)
+            if (jazz_is_solid(g, (s16)(tx >> 4), (s16)(ty >> 4))) return 1;
+    return 0;
+}
+
 static int find_event(u8 stage, u8 klass, int *gx, int *gy)
 {
     int x, y;
@@ -212,22 +223,61 @@ static void test_enemy_activation_kill_and_damage(void)
     }
 }
 
-static void test_springs(void)
+/* Drop the player onto the spring at grid (gx,gy) and return how far the
+ * feet rose above the spring block's top edge, without holding jump. */
+static s16 spring_feet_rise(u8 stage, int gx, int gy)
 {
     JazzGame g;
-    int gx, gy, i;
-    s16 apex;
+    s16 springTop = (s16)(gy << 5);
+    s16 apexFeet;
+    int i;
     jazz_game_init(&g);
-    if (!find_event(0, JJ1_CLASS_SPRING, &gx, &gy)) { CHECK(0, "spring exists"); return; }
-    place_on_ground(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) - 24);
-    jazz_debug_place(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) + 4);
-    apex = g.player.y;
-    for (i = 0; i < 120; i++) {
+    jazz_debug_set_stage(&g, stage);
+    jazz_debug_place(&g, (s16)(gx << 5) + 8, springTop + 4);
+    apexFeet = jazz_player_feet(&g);
+    for (i = 0; i < 240; i++) {
         jazz_step(&g, 0);
-        if (g.player.y < apex) apex = g.player.y;
+        if (jazz_player_feet(&g) < apexFeet) apexFeet = jazz_player_feet(&g);
     }
-    CHECK(((s16)(gy << 5) + 4) - apex >= 80,
-          "spring launches well above an unassisted jump without holding jump");
+    return (s16)(springTop - apexFeet);
+}
+
+static void test_springs(void)
+{
+    int gx, gy;
+
+    /* The original engine rises to magnitude * 21 px above the spring block,
+     * so every spring must clear the highest ledge that is actually landable
+     * from it. These cases were measured from the converted masks: a ledge
+     * only counts if it sits below the ceiling over that spring. */
+    struct { u8 stage; int gx, gy, needed; const char *what; } cases[] = {
+        { 0,  24, 16, 224, "L0 spring (24,16) clears its 224px ledge" },
+        { 0, 237, 16, 160, "L0 spring (237,16) clears its 160px ledge" },
+        { 0,  95, 22, 224, "L0 spring (95,22) clears its 224px ledge" },
+        { 1,  24, 37, 192, "L1 spring (24,37) clears its 192px ledge" },
+        { 1, 165, 46, 192, "L1 spring (165,46) clears its 192px ledge" },
+        { 2,   1, 47,  96, "L2 spring (1,47) clears its 96px ledge" },
+    };
+    size_t c;
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        s16 rise = spring_feet_rise(cases[c].stage, cases[c].gx, cases[c].gy);
+        CHECK(rise >= cases[c].needed, cases[c].what);
+        if (rise < cases[c].needed)
+            fprintf(stderr, "  (rose %d px, needed %d)\n", rise, cases[c].needed);
+    }
+
+    /* Terrain still wins over the launch: the spring at L1 (141,45) sits
+     * under a solid ceiling 224px up, so the ascent must stop there rather
+     * than passing through it. */
+    CHECK(spring_feet_rise(1, 141, 45) < 224, "spring ascent is clamped by a ceiling");
+
+    /* A spring must also out-launch an unassisted jump by a clear margin. */
+    if (find_event(0, JJ1_CLASS_SPRING, &gx, &gy))
+        CHECK(spring_feet_rise(0, gx, gy) > JAZZ_PYO_JUMP,
+              "spring launches higher than a full unassisted jump");
+    else
+        CHECK(0, "spring exists");
 }
 
 static void test_end_of_level_and_episode(void)
@@ -268,6 +318,102 @@ static void test_pause(void)
     CHECK(g.player.x > x, "unpause resumes simulation");
 }
 
+
+/* Shooting a destructible block must break it and open the way through.
+ * Before this existed, wooden signs and destructible walls stayed solid,
+ * which walls the player off from the level 1 exit. */
+static u8 cell_is_solid(u8 stage, int gx, int gy)
+{
+    int mx, my;
+    for (my = 4; my < 32; my += 8)
+        for (mx = 4; mx < 32; mx += 8)
+            if (jj1_runtime_point_solid(stage, (s16)((gx << 5) + mx), (s16)((gy << 5) + my)))
+                return 1;
+    return 0;
+}
+
+/* A destructible that is genuinely solid and has open space to its left, so a
+ * bullet fired from the left can actually reach it. */
+static int find_shootable_destructible(u8 stage, int *ox, int *oy)
+{
+    int gx, gy;
+    for (gy = 1; gy < 63; gy++)
+        for (gx = 1; gx < 255; gx++) {
+            const Jj1EventInfo *info =
+                jj1_event_info(stage, jj1_runtime_event(stage, (s16)gx, (s16)gy));
+            if (info->klass != JJ1_CLASS_DESTRUCT) continue;
+            if (!cell_is_solid(stage, gx, gy)) continue;
+            if (cell_is_solid(stage, gx - 1, gy)) continue;
+            *ox = gx; *oy = gy;
+            return 1;
+        }
+    return 0;
+}
+
+static void test_destructible_scenery(void)
+{
+    JazzGame g;
+    int gx, gy, lvl, i;
+    int found = 0;
+
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT; lvl++) {
+        if (!find_shootable_destructible((u8)lvl, &gx, &gy)) continue;
+        found++;
+        jazz_game_init(&g);
+        jazz_debug_set_stage(&g, (u8)lvl);
+
+        /* An intact destructible is ordinary solid terrain. */
+        CHECK(rect_solid_at(&g, (s16)(gx << 5), (s16)(gy << 5)),
+              "an intact destructible block is solid");
+        CHECK(!jazz_cell_destroyed(&g, (u8)gx, (u8)gy), "the block starts intact");
+
+        /* Stand in the clear cell to its left and fire right at it. */
+        jazz_debug_place(&g, (s16)(((gx - 1) << 5) + 8), (s16)((gy << 5) + 8));
+        for (i = 0; i < 90 && !jazz_cell_destroyed(&g, (u8)gx, (u8)gy); i++)
+            jazz_step(&g, (u16)(((i & 7) == 0) ? JAZZ_INPUT_FIRE : 0));
+
+        CHECK(jazz_cell_destroyed(&g, (u8)gx, (u8)gy),
+              "shooting a destructible block breaks it");
+        CHECK(!rect_solid_at(&g, (s16)(gx << 5), (s16)(gy << 5)),
+              "a destroyed block no longer blocks the way");
+        CHECK(g.destroyCount > 0, "the renderer is told to repaint the block");
+    }
+    CHECK(found == JAZZ_STAGE_COUNT, "every level has shootable destructible scenery");
+}
+
+/* Pickups must never damage the player.  Carrots and rapid-fire used to be
+ * classified as hazards, so collecting one cost health. */
+static void test_items_never_hurt(void)
+{
+    JazzGame g;
+    u16 gx;
+    u8 gy;
+    int checked = 0, lvl;
+
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT; lvl++) {
+        for (gy = 0; gy < 64; gy++) {
+            for (gx = 0; gx < 256; gx++) {
+                const Jj1EventInfo *info =
+                    jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy));
+                if (info->klass != JJ1_CLASS_ITEM) continue;
+                /* Drop the player straight onto the pickup and let it resolve. */
+                jazz_game_init(&g);
+                jazz_debug_set_stage(&g, (u8)lvl);
+                jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 8));
+                jazz_step(&g, 0);
+                if (g.health < 5) {
+                    CHECK(0, "a pickup damaged the player");
+                    fprintf(stderr, "  (level %d, event cell %u,%u)\n", lvl, gx, gy);
+                    return;
+                }
+                checked++;
+            }
+        }
+    }
+    CHECK(checked > 100, "pickups were actually exercised");
+    CHECK(1, "no pickup in any level damages the player");
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -277,6 +423,8 @@ int main(void)
     test_item_collection();
     test_enemy_activation_kill_and_damage();
     test_springs();
+    test_destructible_scenery();
+    test_items_never_hurt();
     test_end_of_level_and_episode();
     test_pause();
     if (failures) {

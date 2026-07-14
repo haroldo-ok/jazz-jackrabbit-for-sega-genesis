@@ -12,3 +12,12 @@ mkdir -p "$ROOT/tests/.tmp"
   "$ROOT/tests/host_data.c" "$ROOT/tests/test_game_core.c" \
   -o "$ROOT/tests/.tmp/game_core_tests"
 "$ROOT/tests/.tmp/game_core_tests"
+
+# Deliberately compiled WITHOUT -DJAZZ_JJ1_RUNTIME: a build that misses the
+# flag must still select the JJ1 runtime, not the legacy prototype stage.
+"$CC_BIN" -std=c99 -Wall -Wextra -Werror -DJAZZ_HOST \
+  -I"$ROOT/inc" -I"$ROOT/src" \
+  "$ROOT/src/game_core.c" "$ROOT/src/jj1_runtime.c" "$ROOT/src/jj1_eventset.c" \
+  "$ROOT/tests/host_data.c" "$ROOT/tests/test_default_runtime.c" \
+  -o "$ROOT/tests/.tmp/default_runtime_test"
+"$ROOT/tests/.tmp/default_runtime_test"
