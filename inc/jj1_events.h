@@ -36,7 +36,8 @@ enum {
     JJ1_CLASS_HAZARD,        /* static, hurts on touch, not shootable */
     JJ1_CLASS_SPRING,        /* modifier 29: upward spring */
     JJ1_CLASS_ONEWAY,        /* modifier 6: land-from-above platform */
-    JJ1_CLASS_END            /* modifier 27: end-of-level sign */
+    JJ1_CLASS_END,           /* modifier 27: end-of-level sign */
+    JJ1_CLASS_DESTRUCT       /* behaviour 21: destructible block/sign */
 };
 
 /* Item modifiers mirroring the original meanings that matter here. */
@@ -50,9 +51,9 @@ enum {
 
 typedef struct {
     u8 klass;                /* JJ1_CLASS_* */
-    u8 param;                /* item modifier, or spring strength 0..2 */
+    u8 param;                /* item modifier, or spring launch magnitude */
     u8 points;               /* score / 25 to fit a byte (gem = 4 -> 100) */
-    u8 strength;             /* enemy hit points */
+    u8 strength;             /* enemy hit points, or destructible shots to break */
 } Jj1EventInfo;
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id);

@@ -27,6 +27,11 @@ static void clear_game(JazzGame *g)
     for (i = 0; i < JAZZ_MAX_BULLETS; i++) g->bullets[i].active = 0;
 #ifdef JAZZ_JJ1_RUNTIME
     for (i = 0; i < sizeof(g->taken); i++) g->taken[i] = 0;
+    for (i = 0; i < sizeof(g->destroyed); i++) g->destroyed[i] = 0;
+    for (i = 0; i < JAZZ_MAX_DESTRUCT_HITS; i++) g->destructHits[i].active = 0;
+    g->destroyCount = 0;
+    g->destroyedX = 0;
+    g->destroyedY = 0;
     g->enemyScanColumn = 0;
 #endif
 }
@@ -44,10 +49,44 @@ u8 jazz_tile_at(const JazzGame *g, s16 tx, s16 ty)
     return g->tiles[ty][tx];
 }
 
+#ifdef JAZZ_JJ1_RUNTIME
+/* Destructible scenery (JJ1 behaviour 21) is ordinary solid terrain until it
+ * has taken `strength` shots, at which point the original engine swaps the
+ * block out (setTile to multiA) and the space becomes passable.  We keep a
+ * one-bit-per-cell overlay instead of rewriting the ROM block map, and every
+ * collision probe below consults it, so a destroyed block stops blocking both
+ * the player and his bullets. */
+u8 jazz_cell_destroyed(const JazzGame *g, u8 gridX, u8 gridY)
+{
+    u16 bit = ((u16)gridY << 8) + gridX;
+    return (u8)((g->destroyed[bit >> 3] >> (bit & 7)) & 1);
+}
+
+static u8 point_destroyed(const JazzGame *g, s16 x, s16 y)
+{
+    s16 gx = x >> 5, gy = y >> 5;
+    if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return 0;
+    return jazz_cell_destroyed(g, (u8)gx, (u8)gy);
+}
+
+static u8 pt_solid(const JazzGame *g, s16 x, s16 y)
+{
+    if (!jj1_runtime_point_solid(g->stage, x, y)) return 0;
+    return !point_destroyed(g, x, y);
+}
+
+static u8 down_pt_solid(const JazzGame *g, s16 x, s16 y)
+{
+    if (!jj1_runtime_down_point_solid(g->stage, x, y)) return 0;
+    return !point_destroyed(g, x, y);
+}
+#endif
+
 u8 jazz_is_solid(const JazzGame *g, s16 tx, s16 ty)
 {
 #ifdef JAZZ_JJ1_RUNTIME
-    return jj1_runtime_solid(g->stage, tx, ty);
+    return pt_solid(g, (s16)(tx << 4), (s16)(ty << 4)) ||
+           pt_solid(g, (s16)((tx << 4) + 15), (s16)((ty << 4) + 15));
 #else
     u8 tile = jazz_tile_at(g, tx, ty);
     return (tile == JAZZ_TILE_SOLID) || (tile == JAZZ_TILE_PLATFORM);
@@ -58,7 +97,19 @@ static u8 rect_hits_solid(const JazzGame *g, s16 x, s16 y, s16 w, s16 h)
 {
     if ((x < 0) || (y < 0) || ((x + w - 1) >= WORLD_W) || ((y + h - 1) >= WORLD_H)) return 1;
 #ifdef JAZZ_JJ1_RUNTIME
-    return jj1_runtime_rect_solid(g->stage, x, y, w, h);
+    {
+        /* Sample the 4px mask grid so a block that has been shot away does not
+           keep blocking, which jj1_runtime_rect_solid alone cannot know. */
+        s16 px, py;
+        for (py = y; py < y + h; py += 4)
+            for (px = x; px < x + w; px += 4)
+                if (pt_solid(g, px, py)) return 1;
+        for (py = y; py < y + h; py += 4)
+            if (pt_solid(g, (s16)(x + w - 1), py)) return 1;
+        for (px = x; px < x + w; px += 4)
+            if (pt_solid(g, px, (s16)(y + h - 1))) return 1;
+        return pt_solid(g, (s16)(x + w - 1), (s16)(y + h - 1));
+    }
 #else
     s16 tx0, tx1, ty0, ty1, tx, ty;
     tx0 = x >> 4; tx1 = (x + w - 1) >> 4;
@@ -230,9 +281,9 @@ static u8 player_side_blocked(const JazzGame *g, s16 x, s16 y, s8 step)
 {
 #ifdef JAZZ_JJ1_RUNTIME
     s16 probeX = x + ((step > 0) ? (PLAYER_W - 1) : 0);
-    return jj1_runtime_point_solid(g->stage, probeX, y + 4) ||
-           jj1_runtime_point_solid(g->stage, probeX, y + (PLAYER_H >> 1)) ||
-           jj1_runtime_point_solid(g->stage, probeX, y + PLAYER_H - 3);
+    return pt_solid(g, probeX, y + 4) ||
+           pt_solid(g, probeX, y + (PLAYER_H >> 1)) ||
+           pt_solid(g, probeX, y + PLAYER_H - 3);
 #else
     (void) step;
     return rect_hits_solid(g, x, y, PLAYER_W, PLAYER_H);
@@ -244,12 +295,12 @@ static u8 player_vertical_blocked(const JazzGame *g, s16 x, s16 y, s8 step)
 #ifdef JAZZ_JJ1_RUNTIME
     s16 probeY = y + ((step > 0) ? (PLAYER_H - 1) : 0);
     if (step > 0)
-        return jj1_runtime_down_point_solid(g->stage, x + 2, probeY) ||
-               jj1_runtime_down_point_solid(g->stage, x + (PLAYER_W >> 1), probeY) ||
-               jj1_runtime_down_point_solid(g->stage, x + PLAYER_W - 3, probeY);
-    return jj1_runtime_point_solid(g->stage, x + 2, probeY) ||
-           jj1_runtime_point_solid(g->stage, x + (PLAYER_W >> 1), probeY) ||
-           jj1_runtime_point_solid(g->stage, x + PLAYER_W - 3, probeY);
+        return down_pt_solid(g, x + 2, probeY) ||
+               down_pt_solid(g, x + (PLAYER_W >> 1), probeY) ||
+               down_pt_solid(g, x + PLAYER_W - 3, probeY);
+    return pt_solid(g, x + 2, probeY) ||
+           pt_solid(g, x + (PLAYER_W >> 1), probeY) ||
+           pt_solid(g, x + PLAYER_W - 3, probeY);
 #else
     (void) step;
     return rect_hits_solid(g, x, y, PLAYER_W, PLAYER_H);
@@ -263,7 +314,7 @@ static s8 jj1_ground_distance(const JazzGame *g, s16 x, s16 y)
 {
     s8 distance;
     for (distance = 0; distance <= 8; distance++) {
-        if (jj1_runtime_down_point_solid(g->stage, x + (PLAYER_W >> 1), y + PLAYER_H + distance))
+        if (down_pt_solid(g, x + (PLAYER_W >> 1), y + PLAYER_H + distance))
             return distance;
     }
     return 9;
@@ -357,6 +408,53 @@ static void kill_enemy(JazzGame *g, JazzEnemy *e)
 #endif
 }
 
+#ifdef JAZZ_JJ1_RUNTIME
+static void destroy_cell(JazzGame *g, u8 gridX, u8 gridY)
+{
+    u16 bit = ((u16)gridY << 8) + gridX;
+    g->destroyed[bit >> 3] |= (u8)(1 << (bit & 7));
+    /* Tell the renderer which block to repaint as empty. */
+    g->destroyedX = gridX;
+    g->destroyedY = gridY;
+    g->destroyCount++;
+}
+
+/* Register a shot against a destructible cell.  The original counts hits per
+ * cell and swaps the block once they reach the event's strength. */
+static void hit_destructible(JazzGame *g, u8 gridX, u8 gridY, u8 strength)
+{
+    u8 i, free_slot = JAZZ_MAX_DESTRUCT_HITS;
+    if (strength <= 1) { destroy_cell(g, gridX, gridY); return; }
+    for (i = 0; i < JAZZ_MAX_DESTRUCT_HITS; i++) {
+        JazzDestructHit *d = &g->destructHits[i];
+        if (d->active && (d->gridX == gridX) && (d->gridY == gridY)) {
+            d->hits++;
+            if (d->hits >= strength) { d->active = 0; destroy_cell(g, gridX, gridY); }
+            return;
+        }
+        if (!d->active && (free_slot == JAZZ_MAX_DESTRUCT_HITS)) free_slot = i;
+    }
+    if (free_slot == JAZZ_MAX_DESTRUCT_HITS) free_slot = 0; /* reuse oldest */
+    g->destructHits[free_slot].gridX = gridX;
+    g->destructHits[free_slot].gridY = gridY;
+    g->destructHits[free_slot].hits = 1;
+    g->destructHits[free_slot].active = 1;
+}
+
+/* A bullet that stopped at (x,y): if it struck a destructible block that is
+ * still standing, damage it. */
+static void bullet_hits_scenery(JazzGame *g, s16 x, s16 y)
+{
+    s16 gx = x >> 5, gy = y >> 5;
+    const Jj1EventInfo *info;
+    if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return;
+    if (jazz_cell_destroyed(g, (u8)gx, (u8)gy)) return;
+    info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
+    if (info->klass != JJ1_CLASS_DESTRUCT) return;
+    hit_destructible(g, (u8)gx, (u8)gy, info->strength);
+}
+#endif
+
 static void update_bullets(JazzGame *g)
 {
     u8 i, e;
@@ -365,7 +463,14 @@ static void update_bullets(JazzGame *g)
         b = &g->bullets[i];
         if (!b->active) continue;
         b->x += b->vx;
-        if (rect_hits_solid(g, b->x, b->y, 4, 4)) { b->active = 0; continue; }
+        if (rect_hits_solid(g, b->x, b->y, 4, 4)) {
+            b->active = 0;
+#ifdef JAZZ_JJ1_RUNTIME
+            /* Probe slightly ahead: the bullet stops at the block's edge. */
+            bullet_hits_scenery(g, (s16)(b->x + ((b->vx > 0) ? 3 : 0)), (s16)(b->y + 2));
+#endif
+            continue;
+        }
         if ((b->x < g->player.x - 400) || (b->x > g->player.x + 400)) { b->active = 0; continue; }
         for (e = 0; e < JAZZ_MAX_ENEMIES; e++) {
             JazzEnemy *en = &g->enemies[e];
@@ -417,7 +522,7 @@ static void spawn_grid_enemy(JazzGame *g, u8 gx, u8 gy, u8 klass, u8 strength)
     if (klass == JJ1_CLASS_ENEMY_WALK) {
         /* settle onto the mask below the event cell */
         while ((e->y < (WORLD_H - ENEMY_H - 1)) &&
-               !jj1_runtime_down_point_solid(g->stage, e->x + (ENEMY_W >> 1), e->y + ENEMY_H)) e->y++;
+               !down_pt_solid(g, e->x + (ENEMY_W >> 1), e->y + ENEMY_H)) e->y++;
         e->homeY = e->y;
     }
 }
@@ -509,8 +614,8 @@ static void update_enemies(JazzGame *g)
             s16 nx = e->x + e->direction;
             s16 footX = nx + ((e->direction > 0) ? (ENEMY_W - 1) : 0);
             /* Turn at walls and at ledges, like the original walkers. */
-            if (jj1_runtime_point_solid(g->stage, footX, e->y + (ENEMY_H >> 1)) ||
-                !jj1_runtime_down_point_solid(g->stage, footX, e->y + ENEMY_H + 2) ||
+            if (pt_solid(g, footX, e->y + (ENEMY_H >> 1)) ||
+                !down_pt_solid(g, footX, e->y + ENEMY_H + 2) ||
                 (nx < e->homeX - 64) || (nx > e->homeX + 64))
                 e->direction = -e->direction;
             else e->x = nx;
@@ -575,6 +680,16 @@ void jazz_debug_place(JazzGame *g, s16 x, s16 y)
     g->player.vy = 0;
     g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
     g->player.springJump = 0;
+}
+
+void jazz_debug_set_stage(JazzGame *g, u8 stage)
+{
+    build_stage(g, stage);
+}
+
+s16 jazz_player_feet(const JazzGame *g)
+{
+    return (s16)(g->player.y + PLAYER_H);
 }
 #endif
 
@@ -700,9 +815,11 @@ void jazz_step(JazzGame *g, u16 input)
         u16 height = jj1_runtime_spring_height(g->stage, g->player.x, g->player.y,
                                                PLAYER_W, PLAYER_H, &springTop);
         if (height) {
-            /* Springs retarget the shared ascent rule, as in the original,
-             * and the ascent proceeds regardless of the jump button. */
-            g->player.jumpTargetY = springTop - (s16)height;
+            /* Springs retarget the shared ascent rule, as in the original:
+             * the FEET rise to `height` px above the spring block (the
+             * player top therefore targets PLAYER_H higher), and the ascent
+             * proceeds regardless of the jump button. */
+            g->player.jumpTargetY = springTop - (s16)height - PLAYER_H;
             g->player.springJump = 1;
             g->player.vy = JAZZ_PYS_JUMP;
             g->player.onGround = 0;

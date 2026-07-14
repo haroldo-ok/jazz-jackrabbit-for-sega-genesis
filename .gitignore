@@ -7,3 +7,6 @@ tests/.tmp/
 # Editor/OS noise
 *.swp
 .DS_Store
+
+# SGDK-generated resource header (built from res/jj1_sounds.res)
+res/jj1_sounds.h

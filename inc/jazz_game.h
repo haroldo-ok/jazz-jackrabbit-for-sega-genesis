@@ -3,6 +3,18 @@
 
 /* Pure game simulation.  It deliberately has no VDP, sound, or controller
  * calls so the same code can be verified on the host and in a Genesis ROM. */
+
+/* The JJ1 runtime (original masks, event grids, physics) is the real game;
+ * the legacy hand-made prototype level survives only as a fallback.  Select
+ * the JJ1 runtime HERE rather than relying on a -D flag in the project
+ * Makefile: a build that uses SGDK's stock makefile, or any other build that
+ * misses the flag, would otherwise silently produce the prototype ROM -
+ * original terrain but no events, i.e. no enemies, items or springs and an
+ * 18-gem hand-made stage.  Define JAZZ_LEGACY_PROTOTYPE to opt out. */
+#if !defined(JAZZ_JJ1_RUNTIME) && !defined(JAZZ_LEGACY_PROTOTYPE)
+#define JAZZ_JJ1_RUNTIME 1
+#endif
+
 #ifdef JAZZ_HOST
 #include <stdint.h>
 typedef uint8_t u8;
@@ -18,6 +30,7 @@ typedef int32_t s32;
 #define JAZZ_MAP_W 96
 #define JAZZ_MAP_H 15
 #define JAZZ_MAX_ENEMIES 8
+#define JAZZ_MAX_DESTRUCT_HITS 6
 #define JAZZ_MAX_GEMS 24
 #define JAZZ_MAX_BULLETS 4
 #define JAZZ_STAGE_COUNT 3
@@ -96,6 +109,13 @@ typedef struct {
     u8 active;
 } JazzGem;
 
+/* Damage in progress on a destructible cell (see JJ1 behaviour 21). */
+typedef struct {
+    u8 gridX, gridY;
+    u8 hits;
+    u8 active;
+} JazzDestructHit;
+
 typedef struct {
     /* Volatile is intentional: a 68000 traps on odd word accesses.  It prevents
      * modern GCC from folding adjacent byte-cell stores into an unaligned word. */
@@ -107,6 +127,14 @@ typedef struct {
 #ifdef JAZZ_JJ1_RUNTIME
     /* One bit per 32x32 event cell: item collected / enemy killed. */
     u8 taken[(256 * 64) / 8];
+    /* One bit per cell: destructible block already shot away.  Kept separate
+       from `taken` because it also has to make the terrain non-solid. */
+    u8 destroyed[(256 * 64) / 8];
+    /* Partial damage for destructibles needing more than one shot. */
+    JazzDestructHit destructHits[JAZZ_MAX_DESTRUCT_HITS];
+    /* Bumped whenever a block is destroyed, so the renderer can redraw it. */
+    u16 destroyCount;
+    u8 destroyedX, destroyedY;
     u16 enemyScanColumn;
 #endif
     u16 previousInput;
@@ -131,7 +159,13 @@ u8 jazz_is_solid(const JazzGame *game, s16 tx, s16 ty);
 u8 jazz_tile_at(const JazzGame *game, s16 tx, s16 ty);
 #ifdef JAZZ_JJ1_RUNTIME
 u8 jazz_event_taken(const JazzGame *game, u8 gridX, u8 gridY);
+/* True once a destructible block at this cell has been shot away. */
+u8 jazz_cell_destroyed(const JazzGame *game, u8 gridX, u8 gridY);
 void jazz_debug_place(JazzGame *game, s16 x, s16 y);
+/* Rebuild the game on a given stage (tests only). */
+void jazz_debug_set_stage(JazzGame *game, u8 stage);
+/* Y coordinate of the player's feet, i.e. the bottom of the collision body. */
+s16 jazz_player_feet(const JazzGame *game);
 #endif
 
 #endif
