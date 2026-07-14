@@ -414,6 +414,43 @@ static void test_items_never_hurt(void)
     CHECK(1, "no pickup in any level damages the player");
 }
 
+
+/* The wooden signpost must be shootable.  Event 17 sits on exactly one block
+ * in the Diamondus levels - the signpost graphic - and was classified as food,
+ * so bullets passed through it and the sign stayed up forever. */
+static void test_signposts_are_destructible(void)
+{
+    JazzGame g;
+    int lvl, signs = 0;
+
+    for (lvl = 0; lvl < 2; lvl++) {   /* Diamondus set: levels 0 and 1 */
+        u16 gx;
+        u8 gy;
+        for (gy = 0; gy < 64; gy++)
+            for (gx = 0; gx < 256; gx++) {
+                if (jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy) != 17) continue;
+                signs++;
+                CHECK(jj1_event_info((u8)lvl, 17)->klass == JJ1_CLASS_DESTRUCT,
+                      "the signpost event is destructible scenery");
+                /* And it must actually break when shot. */
+                jazz_game_init(&g);
+                jazz_debug_set_stage(&g, (u8)lvl);
+                if (cell_is_solid((u8)lvl, (int)gx - 1, (int)gy)) continue;
+                jazz_debug_place(&g, (s16)(((gx - 1) << 5) + 8), (s16)((gy << 5) + 8));
+                {
+                    int i;
+                    for (i = 0; i < 90 && !jazz_cell_destroyed(&g, (u8)gx, (u8)gy); i++)
+                        jazz_step(&g, (u16)(((i & 7) == 0) ? JAZZ_INPUT_FIRE : 0));
+                }
+                CHECK(jazz_cell_destroyed(&g, (u8)gx, (u8)gy),
+                      "shooting the signpost knocks it down");
+                goto next_level;   /* one proven sign per level is enough */
+            }
+next_level: ;
+    }
+    CHECK(signs > 0, "the Diamondus levels contain signposts");
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -424,6 +461,7 @@ int main(void)
     test_enemy_activation_kill_and_damage();
     test_springs();
     test_destructible_scenery();
+    test_signposts_are_destructible();
     test_items_never_hurt();
     test_end_of_level_and_episode();
     test_pause();

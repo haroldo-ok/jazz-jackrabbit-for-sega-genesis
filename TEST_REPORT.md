@@ -36,6 +36,18 @@
 
 ## Fixes in this pass
 
+- **The wooden signposts are destructible now.** They were still solid after
+  destructible walls started working, because they are not what I first
+  assumed. Identified from the data: event 17 sits on exactly one block in the
+  Diamondus levels - block 41, the "RABBITS STINK" signpost graphic - and it
+  was classified as *food*, so bullets passed straight through it. It is now
+  destructible scenery. (The "KILL this rabbit" boards, blocks 43+53, genuinely
+  carry no event in the original data and so are plain scenery.) The earlier
+  guess that ID 15 was the sign was wrong - it sits on gem-studded rock - and
+  has been reverted to a pickup. Verified on target: running and firing through
+  level 0 leaves destroyCount=2 with the last cell at grid (40,8), the exact
+  signpost coordinates.
+
 - **Destructible scenery (wooden signs and walls) now breaks.** The original
   implements these as JJ1 *behaviour 21*: the engine counts hits against the
   cell and swaps the block out once they reach the event's `strength`

@@ -68,9 +68,12 @@ static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [11] = EV_WALKER,
     [13] = EV_CARROT,    /* grounded singles along the route              */
     [14] = EV_AMMO,      /* grounded, short rows                          */
-    [15] = EV_DESTRUCT(1),  /* short runs buried in solid rock: wooden sign */
+    [15] = EV_FOOD,      /* sits on gem-studded rock, not a sign            */
     [16] = EV_FOOD,
-    [17] = EV_FOOD,
+    /* 17 sits on exactly one block in every level: the wooden "RABBITS STINK"
+       signpost.  It is the destructible sign - it was classified as food, so
+       shots passed straight through and the sign could never be cleared. */
+    [17] = EV_DESTRUCT(1),
     [19] = EV_GEM,       /* grounded gem                                  */
     [20] = EV_GEM,       /* airborne gem rows/arcs                        */
     [21] = EV_SPRING(12),  /* clears its highest landable ledge: 224 px */
@@ -102,7 +105,7 @@ static const Jj1EventInfo jj1_eventset_level2[128] = {
     [14] = EV_AMMO,
     [20] = EV_GEM,
     [23] = EV_SPRING(6),   /* clears its highest landable ledge:  96 px */
-    [15] = EV_DESTRUCT(1),
+    [17] = EV_DESTRUCT(1),  /* wooden signpost, as in the Diamondus set */
     [124] = EV_DESTRUCT(1),
     [125] = EV_DESTRUCT(1),
     [24] = EV_LIFE,
