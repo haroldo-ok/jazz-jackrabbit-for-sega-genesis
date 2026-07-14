@@ -36,6 +36,22 @@
 
 ## Fixes in this pass
 
+- **Breakable walls restored, and the destructible set put on real evidence.**
+  Reclassifying event 15 as a pickup silently made the walls solid again. It is
+  in fact the breakable wall: it always appears as a horizontal PAIR of cells
+  buried 100% inside solid rock (three pairs per level), which nothing
+  collectable could be. Restored to destructible and pinned by a test.
+  Conversely, 124/125 were never destructible: they blanket hundreds of cells
+  of ordinary terrain and only 41-79% of them are even inside solid rock, so
+  many sit in open air - they are region markers like 123, and treating them as
+  breakable let the player shoot away arbitrary scenery. A test now asserts
+  they are NOT shootable. The original hard-codes only two tile-level event
+  IDs (JJ1Level::checkMaskUp / checkSpikes): 122 one-way (already handled) and
+  126 spikes, which none of the three levels use.
+
+  Destructible scenery is therefore exactly: **15 = breakable wall**,
+  **17 = wooden signpost**.
+
 - **The wooden signposts are destructible now.** They were still solid after
   destructible walls started working, because they are not what I first
   assumed. Identified from the data: event 17 sits on exactly one block in the
