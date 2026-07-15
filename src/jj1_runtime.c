@@ -14,21 +14,48 @@ typedef struct {
     u16 startX, startY;
 } Jj1LevelData;
 
+/* One entry per stage.  The shareware ships eight levels across three worlds;
+ * the map, event grid and masks are per level, while the 120KB tile bank is
+ * shared by every level in a world (see gfx.c). */
+#define JJ1_LEVEL(n) { jj1_level##n##_blocks, jj1_level##n##_masks, \
+                       jj1_level##n##_events, 0, 0 }
+
 static Jj1LevelData jj1_level_data(u8 stage)
 {
     Jj1LevelData d;
-    if (stage == 1) {
+    switch (stage) {
+    case 1:
         d.blocks = jj1_level1_blocks; d.masks = jj1_level1_masks;
         d.events = jj1_level1_events;
-        d.startX = jj1_level1_start_x; d.startY = jj1_level1_start_y;
-    } else if (stage >= 2) {
+        d.startX = jj1_level1_start_x; d.startY = jj1_level1_start_y; break;
+    case 2:
         d.blocks = jj1_level2_blocks; d.masks = jj1_level2_masks;
         d.events = jj1_level2_events;
-        d.startX = jj1_level2_start_x; d.startY = jj1_level2_start_y;
-    } else {
+        d.startX = jj1_level2_start_x; d.startY = jj1_level2_start_y; break;
+    case 3:
+        d.blocks = jj1_level3_blocks; d.masks = jj1_level3_masks;
+        d.events = jj1_level3_events;
+        d.startX = jj1_level3_start_x; d.startY = jj1_level3_start_y; break;
+    case 4:
+        d.blocks = jj1_level4_blocks; d.masks = jj1_level4_masks;
+        d.events = jj1_level4_events;
+        d.startX = jj1_level4_start_x; d.startY = jj1_level4_start_y; break;
+    case 5:
+        d.blocks = jj1_level5_blocks; d.masks = jj1_level5_masks;
+        d.events = jj1_level5_events;
+        d.startX = jj1_level5_start_x; d.startY = jj1_level5_start_y; break;
+    case 6:
+        d.blocks = jj1_level6_blocks; d.masks = jj1_level6_masks;
+        d.events = jj1_level6_events;
+        d.startX = jj1_level6_start_x; d.startY = jj1_level6_start_y; break;
+    case 7:
+        d.blocks = jj1_level7_blocks; d.masks = jj1_level7_masks;
+        d.events = jj1_level7_events;
+        d.startX = jj1_level7_start_x; d.startY = jj1_level7_start_y; break;
+    default:
         d.blocks = jj1_level0_blocks; d.masks = jj1_level0_masks;
         d.events = jj1_level0_events;
-        d.startX = jj1_level0_start_x; d.startY = jj1_level0_start_y;
+        d.startX = jj1_level0_start_x; d.startY = jj1_level0_start_y; break;
     }
     return d;
 }

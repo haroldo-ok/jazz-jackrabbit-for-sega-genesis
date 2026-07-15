@@ -10,3 +10,15 @@ tests/.tmp/
 
 # SGDK-generated resource header (built from res/jj1_sounds.res)
 res/jj1_sounds.h
+
+# Assets converted from the shareware game data.  Anyone building this needs
+# their own legal copy of Jazz Jackrabbit; regenerate with:
+#   python3 tools/build_sgdk_jj1_visuals.py --input <install> --level LEVEL0.000 \
+#       --world 000 --output src/jj1_visuals.inc
+#   python3 tools/build_sgdk_jj1_level_data.py --input <install> --level LEVELn.000 \
+#       --name jj1_leveln --output src/jj1_leveln_data.inc \
+#       --eventset src/jj1_leveln_eventset.inc
+# Uncomment these if you would rather not carry Epic's converted art in git.
+#src/jj1_visuals.inc
+#src/jj1_level*_data.inc
+#src/jj1_level*_eventset.inc

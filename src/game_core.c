@@ -2,8 +2,8 @@
 
 #define PLAYER_W 14
 #define PLAYER_H 22
-#define ENEMY_W 14
-#define ENEMY_H 16
+#define ENEMY_W JAZZ_ENEMY_W
+#define ENEMY_H JAZZ_ENEMY_H
 
 #ifdef JAZZ_JJ1_RUNTIME
 #define WORLD_W (256 * 32)

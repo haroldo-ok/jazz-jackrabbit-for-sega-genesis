@@ -149,7 +149,11 @@ def save_tile_sheet(tiles: list[bytes], palette: list[tuple[int, int, int]], tar
     sheet.save(target)
 
 
+SKEY = 254  # sprite colour key (JJ1Level::loadSprite); NOT the tile TRANSPARENT
+
+
 def descramble(data: bytes) -> bytes:
+    """File::loadPixels(length): gather each pixel from the interleaved quarters."""
     length = len(data)
     if length % 4:
         raise DecodeError("sprite length is not divisible by 4")
@@ -158,6 +162,20 @@ def descramble(data: bytes) -> bytes:
 
 
 def load_sprite(r: Reader) -> Optional[tuple[int, int, bytes]]:
+    """Decode one sprite exactly as JJ1Level::loadSprite + File::loadPixels do.
+
+    The masked path is easy to get subtly wrong, and getting it wrong desyncs
+    the reader so every later sprite decodes as noise:
+
+      1. read one mask bit per pixel, four packed into the low end of a byte;
+      2. SCATTER the mask through the interleave permutation;
+      3. read a pixel byte for each set mask bit, in that scrambled order,
+         skipping any byte equal to the colour key;
+      4. GATHER the pixel buffer back into image order.
+
+    Steps 2 and 4 use inverse permutations - doing the same one twice, or
+    skipping step 4, is what produced garbage.
+    """
     if r.pos >= len(r.data):
         return None
     width = r.u16() * 4
@@ -167,27 +185,91 @@ def load_sprite(r: Reader) -> Optional[tuple[int, int, bytes]]:
     next_offset = r.u16() * 4
     if not width:
         return None
+
     if mask_offset:
         height += 1
         r.skip(mask_offset)
-        expected_next = next_offset + r.pos + ((width // 4) * height)
-        pixel_count = width * height
-        mask = bytearray(pixel_count)
-        for i in range(pixel_count):
-            if not (i & 3):
+        end = next_offset + r.pos + ((width // 4) * height)
+        length = width * height
+        quarter = length >> 2
+
+        mask_bits = bytearray(length)
+        packed = 0
+        for n in range(length):
+            if not (n & 3):
                 packed = r.byte()
-            mask[i] = (packed >> (i & 3)) & 1
-        decoded = bytearray([TRANSPARENT]) * pixel_count
-        for i, enabled in enumerate(descramble(mask)):
-            if enabled:
+            mask_bits[n] = (packed >> (n & 3)) & 1
+
+        scrambled_mask = bytearray(length)
+        for n in range(length):
+            scrambled_mask[(n >> 2) + ((n & 3) * quarter)] = mask_bits[n]
+
+        scrambled_pixels = bytearray([SKEY]) * length
+        for n in range(length):
+            if scrambled_mask[n]:
                 value = r.byte()
-                while value == TRANSPARENT:
+                while value == SKEY:
                     value = r.byte()
-                decoded[i] = value
-        r.seek(expected_next)
-        return width, height, bytes(decoded)
+                scrambled_pixels[n] = value
+
+        pixels = bytes(scrambled_pixels[(n >> 2) + ((n & 3) * quarter)] for n in range(length))
+        r.seek(end)
+        return width, height, pixels
+
     raw = r.block(width * height)
     return width, height, descramble(raw)
+
+
+def decode_sprite_set(sprite_path: Path) -> list[Optional[tuple[int, int, bytes]]]:
+    """Decode SPRITES.<world>, the sprite bank the level's animations index into.
+
+    Same container as MAINCHAR.000: a u16 count, then `count` anchor words, then
+    the sprite images laid out sequentially.  A leading 0xFF marks an empty slot,
+    which still consumes an index (so indices stay aligned with the animation
+    records that reference them).
+    """
+    r = Reader(sprite_path.read_bytes())
+    count = r.u16()
+    if count > 512:
+        raise DecodeError(f"invalid sprite count: {count}")
+    r.skip(count * 2)  # anchor offsets; images remain sequential
+    result: list[Optional[tuple[int, int, bytes]]] = []
+    for _ in range(count):
+        if r.pos >= len(r.data):
+            result.append(None)
+            continue
+        if r.data[r.pos] == 0xFF:
+            r.skip(2)
+            result.append(None)
+            continue
+        result.append(load_sprite(r))
+    return result
+
+
+def decode_anims(anims: bytes) -> list[dict]:
+    """Decode the level's 128 x 64-byte animation records.
+
+    Mirrors JJ1Level::load: byte 6 is the frame count, bytes 7.. are the sprite
+    indices for each frame, and bytes 26.. / 45.. are the per-frame x/y offsets.
+    """
+    out: list[dict] = []
+    for i in range(128):
+        base = i << 6
+        record = anims[base:base + 64]
+        frames = record[6]
+        if frames > 19:      # 19 frame slots exist between offsets 7 and 26
+            frames = 19
+        out.append({
+            "frames": [
+                {
+                    "sprite": record[7 + n],
+                    "x": record[26 + n] - 256 if record[26 + n] > 127 else record[26 + n],
+                    "y": record[45 + n] - 256 if record[45 + n] > 127 else record[45 + n],
+                }
+                for n in range(frames)
+            ],
+        })
+    return out
 
 
 def decode_mainchar(main_path: Path, sprite_path: Path) -> list[Optional[tuple[int, int, bytes]]]:

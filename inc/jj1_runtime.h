@@ -12,6 +12,7 @@
 
 #include "jazz_game.h"
 
+/* The shareware ships eight levels across three worlds. */
 extern const u8 jj1_level0_blocks[256 * 64];
 extern const u8 jj1_level0_events[256 * 64];
 extern const u8 jj1_level0_masks[(240 + 16) * 8];
@@ -24,6 +25,26 @@ extern const u8 jj1_level2_blocks[256 * 64];
 extern const u8 jj1_level2_events[256 * 64];
 extern const u8 jj1_level2_masks[(240 + 16) * 8];
 extern const u16 jj1_level2_start_x, jj1_level2_start_y;
+extern const u8 jj1_level3_blocks[256 * 64];
+extern const u8 jj1_level3_events[256 * 64];
+extern const u8 jj1_level3_masks[(240 + 16) * 8];
+extern const u16 jj1_level3_start_x, jj1_level3_start_y;
+extern const u8 jj1_level4_blocks[256 * 64];
+extern const u8 jj1_level4_events[256 * 64];
+extern const u8 jj1_level4_masks[(240 + 16) * 8];
+extern const u16 jj1_level4_start_x, jj1_level4_start_y;
+extern const u8 jj1_level5_blocks[256 * 64];
+extern const u8 jj1_level5_events[256 * 64];
+extern const u8 jj1_level5_masks[(240 + 16) * 8];
+extern const u16 jj1_level5_start_x, jj1_level5_start_y;
+extern const u8 jj1_level6_blocks[256 * 64];
+extern const u8 jj1_level6_events[256 * 64];
+extern const u8 jj1_level6_masks[(240 + 16) * 8];
+extern const u16 jj1_level6_start_x, jj1_level6_start_y;
+extern const u8 jj1_level7_blocks[256 * 64];
+extern const u8 jj1_level7_events[256 * 64];
+extern const u8 jj1_level7_masks[(240 + 16) * 8];
+extern const u16 jj1_level7_start_x, jj1_level7_start_y;
 
 u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY);
 u8 jj1_runtime_point_solid(u8 stage, s16 x, s16 y);

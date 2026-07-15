@@ -9,6 +9,11 @@
 #include "jj1_level0_eventset.inc"
 #include "jj1_level1_eventset.inc"
 #include "jj1_level2_eventset.inc"
+#include "jj1_level3_eventset.inc"
+#include "jj1_level4_eventset.inc"
+#include "jj1_level5_eventset.inc"
+#include "jj1_level6_eventset.inc"
+#include "jj1_level7_eventset.inc"
 #endif
 #endif
 
@@ -132,14 +137,21 @@ const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 
 #else /* JJ1_HAVE_GENERATED_EVENTSETS */
 
+/* Every level carries its own event records, so each stage gets its own table.
+   Falling back to another level's table (as the three-stage version did for
+   anything past stage 2) misclassifies every event in that level. */
+static const Jj1EventInfo *const jj1_eventsets[JAZZ_STAGE_COUNT] = {
+    jj1_level0_eventset, jj1_level1_eventset, jj1_level2_eventset,
+    jj1_level3_eventset, jj1_level4_eventset, jj1_level5_eventset,
+    jj1_level6_eventset, jj1_level7_eventset,
+};
+
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 {
     static const Jj1EventInfo none = { JJ1_CLASS_NONE, 0, 0, 0 };
-    const Jj1EventInfo *set = jj1_level0_eventset;
-    if (stage == 1) set = jj1_level1_eventset;
-    else if (stage >= 2) set = jj1_level2_eventset;
     if (id >= 128) return &none;
-    return &set[id];
+    if (stage >= JAZZ_STAGE_COUNT) stage = 0;
+    return &jj1_eventsets[stage][id];
 }
 
 #endif

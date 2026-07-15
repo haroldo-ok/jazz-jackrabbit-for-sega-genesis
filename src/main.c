@@ -18,6 +18,9 @@ static s16 cameraY;
 static s16 lastMapColumn;
 static u8 renderedStage;
 static u16 renderedDestroyCount;
+/* Which (event, frame) each enemy VRAM slot currently holds; 0xFFFF = unknown. */
+static u16 enemySlotArt[JAZZ_MAX_ENEMIES];
+static u8 playerSlotFrame;
 static u8 selectedStage;   /* level select on the title screen */
 static u16 titlePreviousPad;
 static u8 sfxTimer;
@@ -141,6 +144,7 @@ static u8 jj1BlockCache[JJ1_BLOCK_CACHE_BLOCKS];
 static u8 jj1CacheReplace;
 static s16 jj1MapOriginX = -1;
 static s16 jj1MapOriginY = -1;
+static const Jj1StageArt *stageArt;
 static const u32 *jj1ActiveBlockTiles;
 static const u8 *jj1ActiveBlocks;
 
@@ -248,23 +252,21 @@ static void render_jj1_sky(void)
 
 static void render_backdrop(u8 stage)
 {
-    const u16 *palette = jj1_level0_palette;
+    /* Everything that varies by stage comes from one table: the world's tile
+       bank and palette, plus this level's sprite palette, Jazz frames, springs
+       and event sprites. */
+    stageArt = &jazz_stage_art[(stage < JAZZ_STAGE_COUNT) ? stage : 0];
+    jj1ActiveBlockTiles = stageArt->blockTiles;
+    jj1ActiveBlocks = stageArt->blocks;
 
-    /* All three shareware foreground maps now use the same 88-block runtime
-       cache; only ROM source pointers and palette change by stage. */
-    jj1ActiveBlockTiles = jj1_level0_block_tiles;
-    jj1ActiveBlocks = jj1_level0_blocks;
-    if (stage == 1) {
-        jj1ActiveBlockTiles = jj1_level1_block_tiles;
-        jj1ActiveBlocks = jj1_level1_blocks;
-        palette = jj1_level1_palette;
-    } else if (stage >= 2) {
-        jj1ActiveBlockTiles = jj1_level2_block_tiles;
-        jj1ActiveBlocks = jj1_level2_blocks;
-        palette = jj1_level2_palette;
-    }
+    PAL_setPalette(PAL2, stageArt->blockPalette, DMA);
+    PAL_setPalette(PAL1, stageArt->pal1, DMA);
+    VDP_loadTileData(stageArt->springTiles, T_SPRING,
+                     JJ1_SPRING_VARIANTS * JJ1_SPRING_TILES_PER_VARIANT, DMA);
+    /* Force the streamed slots to refill against the new art. */
+    playerSlotFrame = 0xFF;
+    for (u8 i = 0; i < JAZZ_MAX_ENEMIES; i++) enemySlotArt[i] = 0xFFFF;
 
-    PAL_setPalette(PAL2, palette, DMA);
     render_jj1_sky();
     reset_jj1_cache();
     render_jj1_map(0, 0);
@@ -278,8 +280,7 @@ static void load_video_assets(void)
     VDP_setPlaneSize(64, 32, TRUE);
     VDP_setScrollingMode(HSCROLL_PLANE, VSCROLL_PLANE);
     VDP_loadTileData(jazz_world_tiles, T_EMPTY, 7, DMA);
-    VDP_loadTileData(jazz_player_tiles, T_PLAYER, JJ1_PLAYER_FRAME_COUNT * JJ1_PLAYER_FRAME_TILES, DMA);
-    VDP_loadTileData(jazz_spring_tiles, T_SPRING, JJ1_SPRING_VARIANTS * JJ1_SPRING_TILES_PER_VARIANT, DMA);
+    /* Jazz streams like the enemies: only the current frame is resident. */
     VDP_loadTileData(jazz_enemy_walker_tiles, T_ENEMY_WALK, 2 * JJ1_WALKER_FRAME_TILES, DMA);
     VDP_loadTileData(jazz_enemy_flyer_tiles, T_ENEMY_FLY, 2 * JJ1_FLYER_FRAME_TILES, DMA);
     VDP_loadTileData(jazz_enemy_hazard_tiles, T_ENEMY_HAZARD, 4, DMA);
@@ -287,7 +288,6 @@ static void load_video_assets(void)
     VDP_loadTileData(jazz_bullet_tile, T_BULLET, 1, DMA);
     VDP_loadTileData(jj1_sky_tiles, T_JJ1_SKY, 8, DMA);
     PAL_setPalette(PAL0, jazz_pal0, DMA);
-    PAL_setPalette(PAL1, jazz_pal1, DMA);
     PAL_setPalette(PAL3, jj1_sky_palette, DMA);
     VDP_setBackgroundColor(0);
     VDP_setTextPalette(PAL0);
@@ -369,30 +369,78 @@ static void render_sprites(void)
     u16 count = 0;
     u8 i;
     VDP_resetSprites();
-    if (!(game.invulnerability && (game.frame & 4)))
-        /* The 32px MAINCHAR frames have their visible feet on the bottom
-           row, so align the frame bottom with the 22px collision body's
-           floor: draw at y + PLAYER_H - 32 = y - 10. */
-        put_sprite(&count, game.player.x - cameraX - 8, game.player.y - cameraY - 10, SPRITE_SIZE(4, 4),
-                   TILE_ATTR_FULL(PAL1, TRUE, FALSE, !game.player.facing,
-                   T_PLAYER + (((game.frame >> 3) & (JJ1_PLAYER_FRAME_COUNT - 1)) * JJ1_PLAYER_FRAME_TILES)));
+    {
+        u8 frame = (u8)((game.frame >> 3) & (JJ1_PLAYER_FRAME_COUNT - 1));
+        if (playerSlotFrame != frame) {
+            VDP_loadTileData(stageArt->playerTiles + ((u32)frame * JJ1_PLAYER_FRAME_TILES * 8),
+                             T_PLAYER, JJ1_PLAYER_FRAME_TILES, DMA);
+            playerSlotFrame = frame;
+        }
+        if (!(game.invulnerability && (game.frame & 4)))
+            /* The 32px MAINCHAR frames have their visible feet on the bottom
+               row, so align the frame bottom with the 22px collision body's
+               floor: draw at y + PLAYER_H - 32 = y - 10. */
+            put_sprite(&count, game.player.x - cameraX - 8, game.player.y - cameraY - 10,
+                       SPRITE_SIZE(4, 4),
+                       TILE_ATTR_FULL(PAL1, TRUE, FALSE, !game.player.facing, T_PLAYER));
+    }
     render_jj1_events(&count);
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++)
         if (game.enemies[i].active) {
-            u8 anim = (game.frame >> 3) & 1;
-            if (game.enemies[i].klass == JJ1_CLASS_ENEMY_WALK)
-                /* 32x16 frame over the centred 14x16 body, feet aligned. */
-                put_sprite(&count, game.enemies[i].x - cameraX - 9, game.enemies[i].y - cameraY,
-                    SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE,
-                    (game.enemies[i].direction < 0),
-                    T_ENEMY_WALK + (anim * JJ1_WALKER_FRAME_TILES)));
-            else if (game.enemies[i].klass == JJ1_CLASS_ENEMY_FLY)
-                put_sprite(&count, game.enemies[i].x - cameraX - 1, game.enemies[i].y - cameraY,
-                    SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE,
-                    (game.enemies[i].direction < 0),
-                    T_ENEMY_FLY + (anim * JJ1_FLYER_FRAME_TILES)));
+            const JazzEnemy *e = &game.enemies[i];
+            u8 flip = (e->direction < 0);
+            /* Runtime check, not #ifdef: the generated include is compiled
+               into gfx.c, so this translation unit never sees its macro.  gfx.c
+               exports a null pointer when no original sprites were extracted. */
+            u8 id = jj1_runtime_event(game.stage, e->gridX, e->gridY);
+            const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
+            if (art && art->frames) {
+                /* One VRAM slot per active enemy: upload the current frame only
+                   when it changes, so a walking enemy costs one DMA every few
+                   frames rather than one every frame. */
+                u16 slot = T_ENEMY_BASE + (i * JJ1_ENEMY_SLOT_TILES);
+                u8 frame = (u8)((game.frame >> 3) % art->frames);
+                u16 wanted = (u16)((id << 3) | frame);
+                u16 cellW = (u16)(art->tilesW << 3);
+                u16 cellH = (u16)(art->tilesH << 3);
+                u16 tile = slot;
+                u8 cx, cy;
+                if (enemySlotArt[i] != wanted) {
+                    VDP_loadTileData(stageArt->spriteTiles +
+                                     ((u32)(art->tile + (frame * art->tilesW * art->tilesH)) * 8),
+                                     slot, art->tilesW * art->tilesH, DMA);
+                    enemySlotArt[i] = wanted;
+                }
+                /* The cell is centred on the body and stands on its feet; it is
+                   drawn as up to 2x2 chunks because one hardware sprite can
+                   only cover 4x4 tiles. */
+                for (cy = 0; cy < art->tilesH; cy += 4) {
+                    u8 ch = (u8)((art->tilesH - cy > 4) ? 4 : (art->tilesH - cy));
+                    for (cx = 0; cx < art->tilesW; cx += 4) {
+                        u8 cw = (u8)((art->tilesW - cx > 4) ? 4 : (art->tilesW - cx));
+                        s16 ox = (s16)(cx << 3);
+                        /* A flipped sprite mirrors the chunk layout too. */
+                        if (flip) ox = (s16)(cellW - ox - (cw << 3));
+                        put_sprite(&count,
+                                   e->x - cameraX + (JAZZ_ENEMY_W >> 1) - (s16)(cellW >> 1) + ox,
+                                   e->y - cameraY + JAZZ_ENEMY_H - (s16)cellH + (s16)(cy << 3),
+                                   SPRITE_SIZE(cw, ch),
+                                   TILE_ATTR_FULL(PAL1, TRUE, FALSE, flip, tile));
+                        tile = (u16)(tile + (cw * ch));
+                    }
+                }
+                continue;
+            }
+            if (e->klass == JJ1_CLASS_ENEMY_WALK)
+                put_sprite(&count, e->x - cameraX - 9, e->y - cameraY,
+                    SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, flip,
+                    T_ENEMY_WALK + (((game.frame >> 3) & 1) * JJ1_WALKER_FRAME_TILES)));
+            else if (e->klass == JJ1_CLASS_ENEMY_FLY)
+                put_sprite(&count, e->x - cameraX - 1, e->y - cameraY,
+                    SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, flip,
+                    T_ENEMY_FLY + (((game.frame >> 3) & 1) * JJ1_FLYER_FRAME_TILES)));
             else
-                put_sprite(&count, game.enemies[i].x - cameraX - 1, game.enemies[i].y - cameraY,
+                put_sprite(&count, e->x - cameraX - 1, e->y - cameraY,
                     SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
                     T_ENEMY_HAZARD));
         }
@@ -437,6 +485,8 @@ static void begin_play(void)
     render_level_map();
     renderedStage = game.stage;
     renderedDestroyCount = game.destroyCount;
+    for (u8 s = 0; s < JAZZ_MAX_ENEMIES; s++) enemySlotArt[s] = 0xFFFF;
+    playerSlotFrame = 0xFF;
     mode = MODE_PLAY;
 }
 

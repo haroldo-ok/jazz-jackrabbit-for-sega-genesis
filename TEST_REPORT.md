@@ -36,6 +36,25 @@
 
 ## Fixes in this pass
 
+- **All eight shareware levels are now in the ROM** (was three). The shareware
+  ships eight levels across three worlds; the `.018` file is a secret level that
+  reuses the world 2 tile bank. Level select (UP/DOWN on the title) now covers
+  1-8, and every stage boots with its own map, masks, palette, sprites and
+  event table.
+- **Per-world tile banks.** The 120KB block tileset belongs to the *world*, not
+  the level, so it is emitted once per world (3 banks) instead of once per level
+  (8 copies): that alone saves ~600KB of ROM. Maps, event grids, masks, sprite
+  palettes, Jazz frames and event sprites stay per level, because each level
+  carries its **own animation and event tables** (verified: their checksums
+  differ even between levels of the same world).
+- **A bug the extra levels exposed:** the event-table selector fell back to
+  level 2's table for any stage past 2. Every event in the five new levels was
+  therefore misclassified - they reported *zero* enemies. Each stage now has its
+  own table, and a test asserts every level has an end sign, a valid spawn and
+  collectables from its own table.
+
+  ROM: 1MB (was 640KB).
+
 - **Breakable walls restored, and the destructible set put on real evidence.**
   Reclassifying event 15 as a pickup silently made the walls solid again. It is
   in fact the breakable wall: it always appears as a horizontal PAIR of cells

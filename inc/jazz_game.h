@@ -29,11 +29,14 @@ typedef int32_t s32;
 
 #define JAZZ_MAP_W 96
 #define JAZZ_MAP_H 15
-#define JAZZ_MAX_ENEMIES 8
+#define JAZZ_MAX_ENEMIES 6   /* one 48-tile VRAM sprite slot each */
 #define JAZZ_MAX_DESTRUCT_HITS 6
+/* Collision body of an enemy, shared by the core and the renderer. */
+#define JAZZ_ENEMY_W 14
+#define JAZZ_ENEMY_H 16
 #define JAZZ_MAX_GEMS 24
 #define JAZZ_MAX_BULLETS 4
-#define JAZZ_STAGE_COUNT 3
+#define JAZZ_STAGE_COUNT 8   /* all eight shareware levels */
 
 #define JAZZ_INPUT_LEFT  0x0001
 #define JAZZ_INPUT_RIGHT 0x0002
