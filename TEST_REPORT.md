@@ -36,6 +36,41 @@
 
 ## Fixes in this pass
 
+- **All eight shareware levels are now in the ROM** (was three). The shareware
+  ships eight levels across three worlds; the `.018` file is a secret level that
+  reuses the world 2 tile bank. Level select (UP/DOWN on the title) now covers
+  1-8, and every stage boots with its own map, masks, palette, sprites and
+  event table.
+- **Per-world tile banks.** The 120KB block tileset belongs to the *world*, not
+  the level, so it is emitted once per world (3 banks) instead of once per level
+  (8 copies): that alone saves ~600KB of ROM. Maps, event grids, masks, sprite
+  palettes, Jazz frames and event sprites stay per level, because each level
+  carries its **own animation and event tables** (verified: their checksums
+  differ even between levels of the same world).
+- **A bug the extra levels exposed:** the event-table selector fell back to
+  level 2's table for any stage past 2. Every event in the five new levels was
+  therefore misclassified - they reported *zero* enemies. Each stage now has its
+  own table, and a test asserts every level has an end sign, a valid spawn and
+  collectables from its own table.
+
+  ROM: 1MB (was 640KB).
+
+- **Breakable walls restored, and the destructible set put on real evidence.**
+  Reclassifying event 15 as a pickup silently made the walls solid again. It is
+  in fact the breakable wall: it always appears as a horizontal PAIR of cells
+  buried 100% inside solid rock (three pairs per level), which nothing
+  collectable could be. Restored to destructible and pinned by a test.
+  Conversely, 124/125 were never destructible: they blanket hundreds of cells
+  of ordinary terrain and only 41-79% of them are even inside solid rock, so
+  many sit in open air - they are region markers like 123, and treating them as
+  breakable let the player shoot away arbitrary scenery. A test now asserts
+  they are NOT shootable. The original hard-codes only two tile-level event
+  IDs (JJ1Level::checkMaskUp / checkSpikes): 122 one-way (already handled) and
+  126 spikes, which none of the three levels use.
+
+  Destructible scenery is therefore exactly: **15 = breakable wall**,
+  **17 = wooden signpost**.
+
 - **The wooden signposts are destructible now.** They were still solid after
   destructible walls started working, because they are not what I first
   assumed. Identified from the data: event 17 sits on exactly one block in the

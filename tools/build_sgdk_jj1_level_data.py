@@ -54,7 +54,7 @@ def array(name: str, ctype: str, values: list[int], per_line: int, fmt: str) -> 
     return "\n".join(lines)
 
 
-def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int]:
+def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int, bytes]:
     """Mirror JJ1Level::load record skips through mask/start-coordinate data."""
     r = Reader(level_path.read_bytes())
     r.seek(39)
@@ -64,7 +64,7 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int]:
     r.rle(16 * 512)             # movement paths
     eventset = r.rle(127 * 32)  # event definitions
     r.skip_rle()                # event names
-    r.rle(128 * 64)             # animation definitions
+    anims = r.rle(128 * 64)     # animation definitions
     r.skip_rle()                # animation names
     r.skip((16 * (8 + 1)) + 9)  # level block names / compression info
     r.skip(32 * 2)              # sound rates
@@ -79,7 +79,7 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int]:
     r.skip(39)                  # editor tileset names
     start_x = r.u16()
     start_y = r.u16() + 1
-    return grid, masks, eventset, start_x, start_y
+    return grid, masks, eventset, start_x, start_y, anims
 
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
@@ -88,64 +88,97 @@ CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO = range(5)
 
 
-def classify_event(record: bytes) -> tuple[int, int, int, int]:
-    """Map one original 32-byte event record to a (class, param, points/25,
-    strength) tuple, using the same rules the reference GPL engine applies:
-    modifier 0 with strength is an enemy, a scoring record is an item,
-    modifier 6 is a one-way platform, 27/8/41 end the level, 29 is an upward
-    spring, and hurting records that cannot be shot are static hazards."""
+def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int, int]:
+    """Map one original 32-byte event record to (class, param, points/25, strength).
+
+    The modifier values below are the ones the reference GPL engine acts on in
+    JJ1LevelPlayer::touchEvent / setEvent; `movement` 21 is the destructible
+    block.  Reading these straight from the level file replaces the spatial
+    guesswork the Genesis tables used to rely on.
+    """
     movement = record[4]
     magnitude = record[8] if record[8] < 128 else record[8] - 256
     strength = record[9]
     modifier = record[10]
     points = record[11]
+
+    # Destructible scenery is selected by behaviour, not by modifier: the engine
+    # counts hits and swaps the block once they reach `strength`.  Modifier 7
+    # marks the same events as harmless to touch.
+    if movement == 21:
+        return CLASS_DESTRUCT, 0, min(points * 10 // 25, 255), max(1, min(strength, 255))
+    if modifier == 7:
+        return CLASS_NONE, 0, 0, 0
+
     if modifier == 6:
         return CLASS_ONEWAY, 0, 0, 0
-    if modifier in (8, 27, 41):
+    if modifier in (8, 27, 41):          # boss / end of level / bonus level
         return CLASS_END, 0, 0, 0
-    if modifier == 29:
-        # Upward spring: the engine rises to |magnitude| * 21 px above the
-        # spring block, so param carries the absolute magnitude directly.
+    if modifier == 29:                   # upward spring: rises |magnitude| * 21 px
         mag = -magnitude if magnitude < 0 else magnitude
         return CLASS_SPRING, min(mag, 255), 0, 0
-    if movement == 21:
-        # Destructible block/sign: the engine counts hits against the event and
-        # swaps the block once they reach `strength` (setTile to multiA).
-        # Modifier 7 marks these as "must not destroy/hurt on contact".
-        return CLASS_DESTRUCT, 0, 0, max(1, min(strength, 255))
-    if modifier == 7:
-        # Used with destructible blocks; harmless on contact.
-        return CLASS_NONE, 0, 0, 0
-    if modifier == 0 and strength:
+    if modifier == 0 and strength:       # anything that hurts and can be shot
         flying = movement in (6, 7, 25)
         return (CLASS_ENEMY_FLY if flying else CLASS_ENEMY_WALK), 0, 0, min(strength, 255)
-    if modifier == 0 and not strength and points == 0 and movement in (37, 38):
-        return CLASS_NONE, 0, 0, 0
+
+    # Pickups.  These are the modifiers the original treats as collectable, so
+    # none of them can ever damage the player.
+    item = {
+        1: ITEM_SCORE,       # invincibility (not modelled: scores)
+        2: ITEM_HEALTH,      # health
+        3: ITEM_HEALTH,      # full health
+        4: ITEM_LIFE,        # extra life
+        5: ITEM_FASTFEET,    # high-jump feet
+        9: ITEM_SCORE,       # sand timer
+        10: ITEM_SCORE,      # checkpoint
+        11: ITEM_SCORE,      # generic item
+        12: ITEM_AMMO,       # rapid fire
+        15: ITEM_AMMO, 16: ITEM_AMMO, 17: ITEM_AMMO, 18: ITEM_AMMO,
+        19: ITEM_AMMO, 20: ITEM_AMMO, 39: ITEM_AMMO, 40: ITEM_AMMO,
+        26: ITEM_FASTFEET,   # fast feet box
+        33: ITEM_SCORE,      # 1-hit shield
+        36: ITEM_SCORE,      # 4-hit shield
+        37: ITEM_SCORE,      # diamond
+    }.get(modifier)
+    if item is not None:
+        return CLASS_ITEM, item, min(points * 10 // 25, 255), 0
     if points:
-        param = ITEM_SCORE
-        if modifier in (2, 3):
-            param = ITEM_HEALTH
-        elif modifier == 4:
-            param = ITEM_LIFE
-        elif modifier == 5:
-            param = ITEM_FASTFEET
-        elif modifier in (10, 11, 12):
-            param = ITEM_AMMO
-        return CLASS_ITEM, param, min((points * 10) // 25, 255), 0
-    if modifier == 0 and movement and movement < 37:
+        return CLASS_ITEM, ITEM_SCORE, min(points * 10 // 25, 255), 0
+
+    # Only something with an animation can be seen or touched.  Event 123, for
+    # example, has a behaviour but no sprite, no strength and no points, and it
+    # blankets hundreds of cells: it is an invisible region marker, and calling
+    # it a hazard would carpet the level in damage.
+    if has_anim and modifier == 0 and movement and movement < 37:
         return CLASS_HAZARD, 0, 0, 0
     return CLASS_NONE, 0, 0, 0
 
 
-def eventset_include(name: str, eventset: bytes) -> str:
+def eventset_include(name: str, eventset: bytes, anims: bytes) -> str:
     lines = [
         "/* Ground-truth event set generated from the original level file. */",
         f"static const Jj1EventInfo {name}_eventset[128] = {{",
     ]
-    for i in range(127):
-        klass, param, points, strength = classify_event(eventset[i * 32:(i + 1) * 32])
+    # JJ1Level::load fills eventSet[i] from buffer[i * ELENGTH] and then looks
+    # events up as eventSet[grid.event]: record i IS event i.  The old code
+    # emitted record i as event i+1, which shifted every property by one slot.
+    entries: dict[int, tuple[int, int, int, int]] = {}
+    for i in range(1, 127):
+        record = eventset[i * 32:(i + 1) * 32]
+        anim_id = record[6] or record[5]
+        has_anim = bool(anim_id) and anim_id < 128 and anims[(anim_id << 6) + 6] > 0
+        entries[i] = classify_event(record, has_anim)
+
+    # The engine hard-codes two event ids at tile level rather than in the
+    # records (JJ1Level::checkMaskUp / checkSpikes), so their records are blank
+    # and they must be filled in here.
+    entries[122] = (CLASS_ONEWAY, 0, 0, 0)
+    entries[126] = (CLASS_HAZARD, 0, 0, 0)
+
+    for i in sorted(entries):
+        klass, param, points, strength = entries[i]
         if klass or param or points or strength:
-            lines.append(f"    [{i + 1}] = {{ {klass}, {param}, {points}, {strength} }},")
+            lines.append(f"    [{i}] = {{ {klass}, {param}, {points}, {strength} }},")
     lines.append("};")
     return "\n".join(lines)
 
@@ -158,10 +191,14 @@ def main() -> None:
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--eventset", type=Path,
                     help="also write a ground-truth jj1_levelN_eventset.inc")
+    ap.add_argument("--world-tiles", type=Path,
+                    help="write this level's world tileset (BLOCKS.<world>) to its "
+                         "own include; several levels share one world, so the "
+                         "120KB tile bank is emitted once per world, not per level")
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, eventset, start_x, start_y = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y, _anims = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])
@@ -172,27 +209,40 @@ def main() -> None:
     words = [word for block in blocks for word in encode_block(block, source_palette, palette)]
     map_data = [grid[(y + x * 64) * 2] for y in range(64) for x in range(256)]
     event_data = [grid[(y + x * 64) * 2 + 1] & 0x7F for y in range(64) for x in range(256)]
+    # The level map, events and masks are per level; the tile bank and its
+    # palette belong to the world and are shared by every level in it.
     code = [
         "/* Generated from user-supplied JJ1 LEVEL/BLOCKS data. */",
-        f"/* {args.level}, BLOCKS.{ext}; 240 x 16 Genesis patterns, 256x64 block map, 8x8 masks. */",
-        array(f"{args.name}_block_tiles", "u32", words, 4, "0x{:08X}"), "",
+        f"/* {args.level}: 256x64 block map, event grid, 8x8 masks.",
+        f"   Tiles come from the shared BLOCKS.{ext} world bank. */",
         array(f"{args.name}_blocks", "u8", map_data, 16, "0x{:02X}"), "",
         array(f"{args.name}_events", "u8", event_data, 16, "0x{:02X}"), "",
         array(f"{args.name}_masks", "u8", list(masks), 16, "0x{:02X}"), "",
         f"const u16 {args.name}_start_x = {start_x};",
-        f"const u16 {args.name}_start_y = {start_y};", "",
-        f"const u16 {args.name}_palette[16] = {{",
-        "    RGB3_3_3_TO_VDPCOLOR(0,0,0),",
+        f"const u16 {args.name}_start_y = {start_y};",
     ]
-    code.extend(f"    0x{md(color):04X}," for color in palette)
-    code.append("};")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(code) + "\n")
+
+    if args.world_tiles:
+        world = [
+            "/* Generated from user-supplied JJ1 BLOCKS data. */",
+            f"/* BLOCKS.{ext}: 240 x 16 Genesis patterns, shared by every level",
+            "   in this world. */",
+            array(f"jj1_world{ext}_block_tiles", "u32", words, 4, "0x{:08X}"), "",
+            f"const u16 jj1_world{ext}_palette[16] = {{",
+            "    RGB3_3_3_TO_VDPCOLOR(0,0,0),",
+        ]
+        world.extend(f"    0x{md(color):04X}," for color in palette)
+        world.append("};")
+        args.world_tiles.parent.mkdir(parents=True, exist_ok=True)
+        args.world_tiles.write_text("\n".join(world) + "\n")
+        print(f"Generated {args.world_tiles}: BLOCKS.{ext}, {len(words)//8} VDP tiles")
     if args.eventset:
         args.eventset.parent.mkdir(parents=True, exist_ok=True)
-        args.eventset.write_text(eventset_include(args.name, eventset) + "\n")
+        args.eventset.write_text(eventset_include(args.name, eventset, _anims) + "\n")
         print(f"Generated {args.eventset} from the original event records")
-    print(f"Generated {args.output}: {len(blocks)} blocks, {len(words)//8} VDP tiles, masks, start {start_x},{start_y}")
+    print(f"Generated {args.output}: world {ext}, map/events/masks, start {start_x},{start_y}")
 
 
 if __name__ == "__main__":

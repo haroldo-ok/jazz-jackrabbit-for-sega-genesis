@@ -21,3 +21,7 @@ mkdir -p "$ROOT/tests/.tmp"
   "$ROOT/tests/host_data.c" "$ROOT/tests/test_default_runtime.c" \
   -o "$ROOT/tests/.tmp/default_runtime_test"
 "$ROOT/tests/.tmp/default_runtime_test"
+
+# Verifies the event -> animation -> sprite chain used to extract enemy art,
+# against synthetic files in the original formats (no game data needed).
+python3 "$ROOT/tests/test_sprite_extraction.py"

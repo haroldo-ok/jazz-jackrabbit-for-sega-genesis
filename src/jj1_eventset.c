@@ -9,6 +9,11 @@
 #include "jj1_level0_eventset.inc"
 #include "jj1_level1_eventset.inc"
 #include "jj1_level2_eventset.inc"
+#include "jj1_level3_eventset.inc"
+#include "jj1_level4_eventset.inc"
+#include "jj1_level5_eventset.inc"
+#include "jj1_level6_eventset.inc"
+#include "jj1_level7_eventset.inc"
 #endif
 #endif
 
@@ -68,7 +73,11 @@ static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [11] = EV_WALKER,
     [13] = EV_CARROT,    /* grounded singles along the route              */
     [14] = EV_AMMO,      /* grounded, short rows                          */
-    [15] = EV_FOOD,      /* sits on gem-studded rock, not a sign            */
+    /* 15 is the breakable wall: it always appears as a horizontal PAIR of
+       cells buried 100% inside solid rock (three pairs per level).  Shooting
+       it opens the passage.  It is not a pickup - nothing embedded in rock
+       could be collected. */
+    [15] = EV_DESTRUCT(1),
     [16] = EV_FOOD,
     /* 17 sits on exactly one block in every level: the wooden "RABBITS STINK"
        signpost.  It is the destructible sign - it was classified as food, so
@@ -89,12 +98,14 @@ static const Jj1EventInfo jj1_eventset_diamondus[128] = {
     [33] = EV_FLYER,
     [34] = EV_FOOD,
     [35] = EV_WALKER,
+    /* 122 is one-way and 126 is spikes: the original hard-codes both of these
+       at tile level (JJ1Level::checkMaskUp / checkSpikes).  Neither level uses
+       126.  123/124/125 are region markers, NOT destructibles: they span
+       hundreds of cells over ordinary terrain blocks and only 41-79% of them
+       are even inside solid rock, so many sit in open air where a breakable
+       block would be meaningless.  Treating them as destructible let the
+       player shoot away arbitrary scenery. */
     [122] = EV_ONEWAY,
-    /* 123 is decorative background (344 cells, never inside terrain).
-       124/125 sit INSIDE solid rock (41-79%) in long runs (67-96% have a
-       same-ID neighbour): those are the destructible walls. */
-    [124] = EV_DESTRUCT(1),
-    [125] = EV_DESTRUCT(1),
 };
 
 /* LEVEL2.000 set. */
@@ -106,8 +117,6 @@ static const Jj1EventInfo jj1_eventset_level2[128] = {
     [20] = EV_GEM,
     [23] = EV_SPRING(6),   /* clears its highest landable ledge:  96 px */
     [17] = EV_DESTRUCT(1),  /* wooden signpost, as in the Diamondus set */
-    [124] = EV_DESTRUCT(1),
-    [125] = EV_DESTRUCT(1),
     [24] = EV_LIFE,
     [28] = EV_FOOD,
     [35] = EV_FLYER,
@@ -128,14 +137,21 @@ const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 
 #else /* JJ1_HAVE_GENERATED_EVENTSETS */
 
+/* Every level carries its own event records, so each stage gets its own table.
+   Falling back to another level's table (as the three-stage version did for
+   anything past stage 2) misclassifies every event in that level. */
+static const Jj1EventInfo *const jj1_eventsets[JAZZ_STAGE_COUNT] = {
+    jj1_level0_eventset, jj1_level1_eventset, jj1_level2_eventset,
+    jj1_level3_eventset, jj1_level4_eventset, jj1_level5_eventset,
+    jj1_level6_eventset, jj1_level7_eventset,
+};
+
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 {
     static const Jj1EventInfo none = { JJ1_CLASS_NONE, 0, 0, 0 };
-    const Jj1EventInfo *set = jj1_level0_eventset;
-    if (stage == 1) set = jj1_level1_eventset;
-    else if (stage >= 2) set = jj1_level2_eventset;
     if (id >= 128) return &none;
-    return &set[id];
+    if (stage >= JAZZ_STAGE_COUNT) stage = 0;
+    return &jj1_eventsets[stage][id];
 }
 
 #endif
