@@ -12,12 +12,22 @@
 #define T_STAR       (TILE_USER_INDEX + 5)
 #define T_HILL       (TILE_USER_INDEX + 6)
 /* Eight converted 32x32 JJ1 walk frames, 16 VDP tiles each. */
+/* Jazz has a full animation state machine in the original (38 states, each a
+ * left/right pair, selected from the level's MT_P_ANIMS block).  The port
+ * drives the states it actually reaches; each is stored like the enemy sprites
+ * (a cell of up to 2x2 chunks) and streamed into one VRAM slot by state.
+ * The JJ1_PLAYER_* state values live in jazz_game.h so the game core, which
+ * derives the state from physics, can name them without pulling in the VDP. */
+/* Frames per state (kept short, like the enemy sets). */
+#define JJ1_PLAYER_MAX_FRAMES 6
 #define JJ1_PLAYER_FRAME_COUNT 8
-#define JJ1_PLAYER_FRAME_TILES 16
+/* One VRAM slot for Jazz, sized to the largest state cell (4x6 tiles), with
+ * the current frame streamed in when the state or frame changes. */
+#define JJ1_PLAYER_SLOT_TILES 24
 #define T_PLAYER     (TILE_USER_INDEX + 8)
 /* Jazz streams like the enemies: one slot, refilled when the frame changes.
  * Keeping all 8 frames resident cost 128 tiles that the enemy slots need. */
-#define T_SPRING     (T_PLAYER + JJ1_PLAYER_FRAME_TILES)
+#define T_SPRING     (T_PLAYER + JJ1_PLAYER_SLOT_TILES)
 #define JJ1_SPRING_VARIANTS 3
 #define JJ1_SPRING_TILES_PER_VARIANT 8
 /* Enemy VRAM.  Original JJ1 enemy frames are 32x32 (16 tiles each) and there
@@ -72,10 +82,12 @@ extern const u32 jazz_world_tiles[7 * 8];
  * have been extracted; jazz_event_sprites is NULL otherwise and the ROM falls
  * back to the stand-in art above. */
 typedef struct {
-    u16 tile;      /* first tile in jazz_event_sprite_tiles */
+    u16 tile;      /* first tile of the right-facing set */
     u8 frames;
     u8 tilesW;     /* cell size; frames are stored as up to 2x2 chunks of  */
     u8 tilesH;     /* at most 4x4 tiles, one hardware sprite per chunk     */
+    u16 tileLeft;  /* first tile of the left-facing set (== tile if none): */
+                   /* JJ1 has separate art per direction, picked not flipped */
 } Jj1EventSprite;
 
 /* Everything that changes between stages.  The shareware ships eight levels
@@ -88,6 +100,7 @@ typedef struct {
     const u8  *blocks;
     const u16 *pal1;            /* sprite palette */
     const u32 *playerTiles;
+    const Jj1EventSprite *playerStates;   /* one cell per JJ1_PLAYER_* state */
     const u32 *springTiles;
     const u32 *spriteTiles;
     const Jj1EventSprite *sprites;

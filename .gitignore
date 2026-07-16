@@ -10,6 +10,7 @@ tests/.tmp/
 
 # SGDK-generated resource header (built from res/jj1_sounds.res)
 res/jj1_sounds.h
+res/jj1_music.h
 
 # Assets converted from the shareware game data.  Anyone building this needs
 # their own legal copy of Jazz Jackrabbit; regenerate with:
@@ -22,3 +23,8 @@ res/jj1_sounds.h
 #src/jj1_visuals.inc
 #src/jj1_level*_data.inc
 #src/jj1_level*_eventset.inc
+
+# Converted soundtrack (VGM) from your own game data, via
+# github.com/haroldo-ok/convert-s3m-vgm-jazzjackrabbit-md.  Uncomment to keep
+# the audio out of a public repo and have contributors supply their own.
+#res/music/*.vgm

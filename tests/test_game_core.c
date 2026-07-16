@@ -560,6 +560,145 @@ static void test_all_stages_are_playable(void)
     }
 }
 
+
+/* Tubelectric's sucker tubes (JJ1 movement 37/38) push the player along.
+ * They were never implemented, so the player just stood still in the tubes. */
+/* Helper: is the given cell a tube on this stage? */
+static u8 tube_cell(u8 stage, int gx, int gy)
+{
+    if (gx < 0 || gx > 255 || gy < 0 || gy > 63) return 0;
+    return jj1_event_info(stage, jj1_runtime_event(stage, (s16)gx, (s16)gy))->klass
+           == JJ1_CLASS_TUBE;
+}
+
+static void test_sucker_tubes(void)
+{
+    int lvl, found_h = 0, found_v = 0;
+
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT; lvl++) {
+        int gx, gy;
+        for (gy = 1; gy < 63; gy++)
+            for (gx = 1; gx < 255; gx++) {
+                JazzGame g;
+                s16 x0, y0;
+                int f;
+                u8 vert, horiz;
+                if (!tube_cell((u8)lvl, gx, gy)) continue;
+                vert = (tube_cell((u8)lvl, gx, gy - 1) || tube_cell((u8)lvl, gx, gy + 1)) &&
+                       !(tube_cell((u8)lvl, gx - 1, gy) || tube_cell((u8)lvl, gx + 1, gy));
+                horiz = (tube_cell((u8)lvl, gx - 1, gy) || tube_cell((u8)lvl, gx + 1, gy)) &&
+                        !(tube_cell((u8)lvl, gx, gy - 1) || tube_cell((u8)lvl, gx, gy + 1));
+
+                if (vert && !found_v) {
+                    /* A vertical shaft must move the player along the shaft with
+                       no input, not leave him falling under gravity. */
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 8));
+                    y0 = g.player.y;
+                    for (f = 0; f < 8; f++) jazz_step(&g, 0);
+                    CHECK(g.player.y != y0, "a vertical tube moves the player along the shaft");
+                    /* If the shaft continues upward, the player rises. */
+                    if (tube_cell((u8)lvl, gx, gy - 1))
+                        CHECK(g.player.y < y0, "an upward tube carries the player up");
+                    found_v = 1;
+                }
+
+                if (horiz && !found_h) {
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 8));
+                    x0 = g.player.x;
+                    for (f = 0; f < 8; f++) jazz_step(&g, 0);
+                    CHECK(g.player.x != x0, "a horizontal tube carries the player sideways");
+                    found_h = 1;
+                }
+                if (found_h && found_v) goto done;
+            }
+    }
+done:
+    CHECK(found_h, "the levels contain horizontal tubes");
+    CHECK(found_v, "the levels contain vertical tubes");
+}
+
+
+/* Jazz has more than one shot.  The blaster fires straight; the bouncer arcs
+ * under gravity and reflects off surfaces; ammo pickups switch weapons.  Only
+ * the straight blaster was implemented before. */
+static void test_shot_types(void)
+{
+    JazzGame g;
+    int f;
+    s16 y0;
+
+    /* Default is the straight blaster: level flight, no vertical drift. */
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    jazz_debug_place(&g, 300, 300);
+    g.player.facing = 1;
+    g.player.shotType = JAZZ_SHOT_BLASTER;
+    jazz_step(&g, JAZZ_INPUT_FIRE);
+    {
+        int b = -1, i;
+        for (i = 0; i < JAZZ_MAX_BULLETS; i++) if (g.bullets[i].active) { b = i; break; }
+        CHECK(b >= 0, "firing spawns a bullet");
+        if (b >= 0) {
+            y0 = g.bullets[b].y;
+            CHECK(g.bullets[b].vx > 0, "the blaster travels in the facing direction");
+            CHECK(g.bullets[b].gravity == 0, "the blaster is not affected by gravity");
+            for (f = 0; f < 3; f++) jazz_step(&g, 0);
+            /* still roughly level */
+            CHECK(g.bullets[b].active == 0 || (g.bullets[b].y >= y0 - 2 && g.bullets[b].y <= y0 + 2),
+                  "the blaster flies straight");
+        }
+    }
+
+    /* The bouncer arcs: with gravity it gains downward speed over time. */
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    jazz_debug_place(&g, 300, 200);
+    g.player.facing = 1;
+    g.player.shotType = JAZZ_SHOT_BOUNCER;
+    jazz_step(&g, JAZZ_INPUT_FIRE);
+    {
+        int b = -1, i;
+        for (i = 0; i < JAZZ_MAX_BULLETS; i++) if (g.bullets[i].active) { b = i; break; }
+        CHECK(b >= 0, "the bouncer spawns");
+        if (b >= 0) {
+            s16 vy0 = g.bullets[b].vy;
+            CHECK(g.bullets[b].gravity > 0, "the bouncer is affected by gravity");
+            jazz_step(&g, 0);
+            if (g.bullets[b].active)
+                CHECK(g.bullets[b].vy > vy0, "gravity pulls the bouncer downward over time");
+        }
+    }
+
+    /* An ammo pickup switches the weapon. */
+    {
+        u16 gx;
+        u8 gy;
+        int found = 0, lvl;
+        for (lvl = 0; lvl < JAZZ_STAGE_COUNT && !found; lvl++)
+            for (gy = 0; gy < 64 && !found; gy++)
+                for (gx = 0; gx < 256 && !found; gx++) {
+                    const Jj1EventInfo *info =
+                        jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy));
+                    if (info->klass != JJ1_CLASS_ITEM) continue;
+                    if ((info->param & 0x0F) != JJ1_ITEM_AMMO) continue;
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    g.player.shotType = JAZZ_SHOT_BLASTER;
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 6));
+                    jazz_step(&g, 0);
+                    CHECK(g.player.shotType != JAZZ_SHOT_BLASTER ||
+                          ((info->param >> 4) & 0x0F) == JAZZ_SHOT_BLASTER,
+                          "collecting an ammo crate switches the shot type");
+                    found = 1;
+                }
+        CHECK(found, "the shareware levels contain ammo pickups");
+    }
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -577,6 +716,8 @@ int main(void)
     test_end_of_level_and_episode();
     test_pause();
     test_all_stages_are_playable();
+    test_sucker_tubes();
+    test_shot_types();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return EXIT_FAILURE;

@@ -31,7 +31,8 @@
  * (which reuses the world 2 tile bank). */
 #define STAGE(n, world) { \
     jj1_world##world##_block_tiles, jj1_world##world##_palette, jj1_level##n##_blocks, \
-    jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_spring_tiles, \
+    jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_player_states, \
+    jj1_level##n##_spring_tiles, \
     jj1_level##n##_event_sprite_tiles, jj1_level##n##_event_sprites }
 
 const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT] = {

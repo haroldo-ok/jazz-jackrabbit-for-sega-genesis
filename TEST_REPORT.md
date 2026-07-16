@@ -36,6 +36,38 @@
 
 ## Fixes in this pass
 
+- **Vertical sucker tubes.** The Tubelectric tube events all carry a horizontal
+  magnitude byte, but the same event is laid down vertical shafts and horizontal
+  runs (211 of 332 tube cells are vertical). The push now follows the tube's
+  geometry - up/down in a shaft, left/right in a run - so the player rides shafts
+  upward instead of only sliding sideways.
+- **Per-world music.** The Jazz Jackrabbit soundtrack, converted to Genesis VGM
+  by the convert-s3m-vgm-jazzjackrabbit-md tool and compiled here by SGDK's
+  xgmtool, plays through the XGM Z80 driver: the menu theme on the title screen,
+  Diamondus on stages 0-2, Tubelectric on 3-4, and Medivo on 5-7. Sound effects
+  moved to the XGM driver's PCM channels so they play over the music.
+  ROM: 3.5 MB (under the 4 MB unbanked limit).
+
+
+- **Sucker tubes (Tubelectric) push the player.** They are movement 37/38
+  events with a signed magnitude byte, pushing at magnitude * F40 >> 6 (=
+  magnitude * 171 in 8.8). A fast flow overrides input; a slow one can be
+  walked against.
+- **Full player animation reimport.** Replaced the fixed 8-sprite walk cycle
+  with the real state machine: the 38 MT_P_ANIMS indices are read per level and
+  every state (stand/walk/run/jump/fall/shoot/crouch/lookup/skid/hurt/spring)
+  resolves through the same event->anim->sprite chain as the enemies. The ROM
+  derives the state from shared physics and streams the per-state cell.
+- **Medivo sword enemies face the right way.** JJ1 stores separate pre-drawn
+  art per direction and picks by direction rather than hardware-flipping; the
+  "right" set can itself be drawn facing left. Both facings are now extracted
+  (deduplicated when identical) and the ROM selects by direction with no flip.
+- **All player shot types.** Derived from the level's bullet-definition block:
+  blaster, toaster, rising, and the bouncer (arcs under gravity, reflects off
+  surfaces). Bullets gained vertical velocity, gravity and a behaviour byte;
+  ammo pickups switch the weapon.
+
+
 - **All eight shareware levels are now in the ROM** (was three). The shareware
   ships eight levels across three worlds; the `.018` file is a secret level that
   reuses the world 2 tile bank. Level select (UP/DOWN on the title) now covers

@@ -38,6 +38,21 @@ typedef int32_t s32;
 #define JAZZ_MAX_BULLETS 4
 #define JAZZ_STAGE_COUNT 8   /* all eight shareware levels */
 
+/* Player animation states, mapped from the original PA_ indices.  Kept here
+ * (not in jazz_gfx.h) so the game core can derive the state from physics. */
+#define JJ1_PLAYER_STAND  0
+#define JJ1_PLAYER_WALK   1
+#define JJ1_PLAYER_RUN    2
+#define JJ1_PLAYER_JUMP   3
+#define JJ1_PLAYER_FALL   4
+#define JJ1_PLAYER_SHOOT  5
+#define JJ1_PLAYER_CROUCH 6
+#define JJ1_PLAYER_LOOKUP 7
+#define JJ1_PLAYER_SKID   8   /* PA_*STOP: skid/turn */
+#define JJ1_PLAYER_HURT   9
+#define JJ1_PLAYER_SPRING 10
+#define JJ1_PLAYER_STATES 11
+
 #define JAZZ_INPUT_LEFT  0x0001
 #define JAZZ_INPUT_RIGHT 0x0002
 #define JAZZ_INPUT_JUMP  0x0004
@@ -88,6 +103,8 @@ typedef struct {
     u8 facing;
     u8 onGround;
     u8 springJump;     /* current ascent came from a spring: ignore button */
+    u8 shotType;       /* JAZZ_SHOT_*; blaster by default */
+    u8 inTube;         /* inside a sucker tube this frame: tube drives motion */
 } JazzPlayer;
 
 typedef struct {
@@ -103,9 +120,20 @@ typedef struct {
 
 typedef struct {
     s16 x, y;
-    s8 vx;
+    s16 vx, vy;        /* 8.8 px/frame, so shots can rise and fall */
+    s16 subX, subY;    /* 8.8 subpixel accumulators */
+    s8 gravity;        /* 8.8 accel per frame; bouncer/spread arc */
+    u8 behaviour;      /* 0 straight, 4 bouncer (reflects off surfaces) */
     u8 active;
 } JazzBullet;
+
+/* Player shot types, mapped from the level's bullet definitions.  The default
+ * blaster is always available; the others come from ammo pickups. */
+#define JAZZ_SHOT_BLASTER 0
+#define JAZZ_SHOT_TOASTER 1
+#define JAZZ_SHOT_RISING  2
+#define JAZZ_SHOT_BOUNCER 3
+#define JAZZ_SHOT_TYPES   4
 
 typedef struct {
     s16 x, y;
@@ -169,6 +197,9 @@ void jazz_debug_place(JazzGame *game, s16 x, s16 y);
 void jazz_debug_set_stage(JazzGame *game, u8 stage);
 /* Y coordinate of the player's feet, i.e. the bottom of the collision body. */
 s16 jazz_player_feet(const JazzGame *game);
+/* Current player animation state (JJ1_PLAYER_* in jazz_gfx.h), derived from
+ * the same physics the ROM and tests share. */
+u8 jazz_player_anim_state(const JazzGame *game, u16 input);
 #endif
 
 #endif

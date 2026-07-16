@@ -37,7 +37,8 @@ enum {
     JJ1_CLASS_SPRING,        /* modifier 29: upward spring */
     JJ1_CLASS_ONEWAY,        /* modifier 6: land-from-above platform */
     JJ1_CLASS_END,           /* modifier 27: end-of-level sign */
-    JJ1_CLASS_DESTRUCT       /* behaviour 21: destructible block/sign */
+    JJ1_CLASS_DESTRUCT,      /* behaviour 21: destructible block/sign */
+    JJ1_CLASS_TUBE           /* movement 37/38: sucker tube, horizontal push */
 };
 
 /* Item modifiers mirroring the original meanings that matter here. */

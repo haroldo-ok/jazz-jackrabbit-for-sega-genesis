@@ -139,6 +139,57 @@ u16 jj1_runtime_spring_height(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *springT
     return 0;
 }
 
+/* Sucker tube (JJ1 movement 37/38, horizontal variant).  Returns the signed
+ * push velocity in 8.8 px/frame if the box overlaps a tube cell, else 0.  The
+ * event's param carries the original signed magnitude byte; the engine pushes
+ * at magnitude * F40 >> 6, which in this 8.8 model is magnitude * 171. */
+/* Sucker tubes push the player along the tube, and the direction follows the
+ * tube's own shape rather than the (always-horizontal) magnitude byte: JJ1
+ * lays the same event down a vertical shaft or along a horizontal run, so a
+ * cell whose tube neighbours are above/below pushes vertically, and one whose
+ * neighbours are left/right pushes horizontally.  Ignoring this is why the
+ * player only ever slid sideways and never rode a tube upward.  Fills *pushX
+ * and *pushY (8.8 px/frame) and returns non-zero when in a tube. */
+static u8 tube_at(u8 stage, s16 bx, s16 by)
+{
+    if ((bx < 0) || (bx > 255) || (by < 0) || (by > 63)) return 0;
+    return jj1_event_info(stage, jj1_runtime_event(stage, bx, by))->klass == JJ1_CLASS_TUBE;
+}
+
+u8 jj1_runtime_tube_push(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *pushX, s16 *pushY)
+{
+    s16 bx0 = x >> 5;
+    s16 bx1 = (x + w - 1) >> 5;
+    s16 by0 = y >> 5;
+    s16 by1 = (y + h - 1) >> 5;
+    s16 bx, by;
+    *pushX = 0;
+    *pushY = 0;
+    for (by = by0; by <= by1; by++) {
+        for (bx = bx0; bx <= bx1; bx++) {
+            const Jj1EventInfo *info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
+            if (info->klass == JJ1_CLASS_TUBE) {
+                s16 speed = (s16)((s16)(s8)info->param * 171);
+                s16 mag = (speed < 0) ? -speed : speed;
+                u8 up = tube_at(stage, bx, (s16)(by - 1));
+                u8 down = tube_at(stage, bx, (s16)(by + 1));
+                u8 left = tube_at(stage, bx, by) && tube_at(stage, (s16)(bx - 1), by);
+                u8 right = tube_at(stage, (s16)(bx + 1), by);
+                /* A vertical run pushes along the shaft: up if the tube
+                   continues upward, otherwise down.  A horizontal run keeps the
+                   magnitude's own left/right sign. */
+                if ((up || down) && !(left || right)) {
+                    *pushY = up ? (s16)-mag : mag;
+                } else {
+                    *pushX = speed;
+                }
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* End-of-level sign (JJ1 modifier 27). */
 u8 jj1_runtime_touches_end(u8 stage, s16 x, s16 y, s16 w, s16 h)
 {
