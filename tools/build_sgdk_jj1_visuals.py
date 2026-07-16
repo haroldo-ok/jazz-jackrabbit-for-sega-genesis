@@ -88,10 +88,17 @@ def emit_u32_array(name: str, words: list[int]) -> str:
 E_RIGHTANIM = 6
 E_LEFTANIM = 5
 MAX_FRAMES = 4          # frames kept per event; JJ1 anims are short loops
+MAX_PLAYER_FRAMES = 6   # frames kept per Jazz animation state
 
 
-def event_frames(eventset: bytes, anims: list[dict], event_id: int) -> list[dict]:
-    """Frames (sprite index + offsets) for one event's right-facing animation."""
+def event_frames(eventset: bytes, anims: list[dict], event_id: int, facing: str = "R") -> list[dict]:
+    """Frames (sprite index + offsets) for one facing of an event's animation.
+
+    JJ1 stores a separate sprite set for each direction (E_RIGHTANIM at byte 6,
+    E_LEFTANIM at byte 5) and the engine picks by travel direction rather than
+    hardware-flipping - the "right" set may itself be drawn facing left.  So we
+    extract both and let the ROM choose, instead of flipping one.
+    """
     if not (0 < event_id < 128):
         return []
     # eventSet[i] is loaded from buffer[i * 32] and looked up as
@@ -99,7 +106,8 @@ def event_frames(eventset: bytes, anims: list[dict], event_id: int) -> list[dict
     record = eventset[event_id * 32:(event_id + 1) * 32]
     if len(record) < 32:
         return []
-    anim_id = record[E_RIGHTANIM] or record[E_LEFTANIM]
+    primary, secondary = (E_RIGHTANIM, E_LEFTANIM) if facing == "R" else (E_LEFTANIM, E_RIGHTANIM)
+    anim_id = record[primary] or record[secondary]
     if not anim_id or anim_id >= len(anims):
         return []
     return anims[anim_id]["frames"][:MAX_FRAMES]
@@ -188,27 +196,64 @@ def main() -> None:
     # SPRITES.<world> yields a mostly-empty bank.
     sprites = decode_mainchar(args.input / "MAINCHAR.000", sprite_file)
     bank = sprites
-    _grid, _masks, eventset, _sx, _sy, anim_bytes = runtime_records(args.input / args.level)
+    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims = runtime_records(args.input / args.level)
     anims = decode_anims(anim_bytes)
     # The first eight MAINCHAR records are consecutive original Jazz walk
     # frames in the Episode 1 shareware data. Keep all of them resident so the
     # 68000 can animate without a cartridge/VRAM upload every frame.
-    player_frames = sprites[:8]
-    if any(frame is None for frame in player_frames):
-        raise SystemExit("MAINCHAR.000 initial Jazz animation frames are unavailable")
+    # Jazz's animation states come from the level's MT_P_ANIMS block, resolved
+    # through the same animation table as everything else, instead of assuming
+    # the first eight sprites are the whole character.  Map the port's states
+    # to the original PA_ indices (right-facing; the ROM flips for left).
+    PA_RWALK, PA_RJUMP, PA_RSHOOT, PA_RCROUCH, PA_RFALL = 1, 3, 7, 9, 11
+    PA_RSTAND, PA_LOOKUP, PA_RRUN, PA_RSTOP, PA_RHURT, PA_RSPRING = 19, 24, 29, 35, 13, 36
+    player_state_anims = [
+        PA_RSTAND, PA_RWALK, PA_RRUN, PA_RJUMP, PA_RFALL, PA_RSHOOT,
+        PA_RCROUCH, PA_LOOKUP, PA_RSTOP, PA_RHURT, PA_RSPRING,
+    ]
+
+    def frames_for_player_anim(pa_index: int) -> list:
+        anim_id = player_anims[pa_index] if pa_index < len(player_anims) else 0
+        out = []
+        if anim_id and anim_id < len(anims):
+            for frame in anims[anim_id]["frames"][:MAX_PLAYER_FRAMES]:
+                sprite = bank[frame["sprite"]] if frame["sprite"] < len(bank) else None
+                if sprite is not None:
+                    out.append(sprite)
+        if not out:                       # fall back to the standing frame
+            out = [sprites[0]] if sprites and sprites[0] else []
+        return out
+
+    player_state_frames = [frames_for_player_anim(pa) for pa in player_state_anims]
 
     # Resolve every event that appears in this level through its animation,
-    # rather than guessing sprite numbers.
+    # rather than guessing sprite numbers.  JJ1 keeps separate art for each
+    # travel direction and picks by direction (never hardware-flipping), so we
+    # resolve both facings.  When a level only ever draws one facing, or the two
+    # are the same sprites, the second is dropped to avoid doubling the data.
     used = sorted({b for b in _grid[1::2] for b in (b & 0x7F,) if b})
-    event_sprites: dict[int, list] = {}
-    for event_id in used:
-        frames = []
-        for frame in event_frames(eventset, anims, event_id):
+
+    def resolve(event_id, facing):
+        out = []
+        for frame in event_frames(eventset, anims, event_id, facing):
             sprite = bank[frame["sprite"]] if frame["sprite"] < len(bank) else None
             if sprite is not None:
-                frames.append(sprite)
-        if frames:
-            event_sprites[event_id] = frames
+                out.append((frame["sprite"], sprite))
+        return out
+
+    event_sprites: dict[int, list] = {}       # right-facing frames
+    event_sprites_left: dict[int, list] = {}   # left-facing frames, if distinct
+    for event_id in used:
+        right = resolve(event_id, "R")
+        left = resolve(event_id, "L")
+        if not right and not left:
+            continue
+        if not right:
+            right = left
+        event_sprites[event_id] = [s for _, s in right]
+        # Only keep a distinct left set when the sprite ids actually differ.
+        if left and [i for i, _ in left] != [i for i, _ in right]:
+            event_sprites_left[event_id] = [s for _, s in left]
     if not event_sprites:
         raise SystemExit(f"no event animations resolved from {args.level}")
 
@@ -235,17 +280,22 @@ def main() -> None:
         terrain_images.append(full.crop((ox, oy, ox + 8, oy + 8)))
         terrain_masks.append([raw[(oy + y) * 32 + ox + x] == TRANSPARENT for y in range(8) for x in range(8)])
 
-    player_images: list[Image.Image] = []
-    player_masks: list[list[bool]] = []
-    for frame in player_frames:
-        assert frame is not None
-        width, height, player_pixels = frame
-        if width < 32 or height < 32:
-            raise SystemExit(f"unexpected Jazz sprite size {width}x{height}")
-        raw_player = Image.frombytes("P", (width, height), player_pixels)
-        raw_player.putpalette([component for rgb in source_palette for component in rgb])
-        player_images.append(raw_player.crop((0, 0, 32, 32)))
-        player_masks.append([player_pixels[y * width + x] == SKEY for y in range(32) for x in range(32)])
+    # One cell per player state, sized to that state's frames, exactly like the
+    # enemy cells (Jazz's frames are not all 32x32 either: swim is 48 wide).
+    player_state_images: list[list] = []
+    player_state_masks: list[list] = []
+    player_state_cells: list[tuple[int, int]] = []
+    for frames in player_state_frames:
+        cw, ch = cell_size(frames) if frames else (32, 32)
+        player_state_cells.append((cw, ch))
+        images, masks = [], []
+        for sprite in frames:
+            image, mask = sprite_to_image(sprite, source_palette, cw, ch)
+            images.append(image)
+            masks.append(mask)
+        player_state_images.append(images)
+        player_state_masks.append(masks)
+    flat_player = [im for images in player_state_images for im in images]
 
     # Springs vary in size between worlds, so centre them in the cell rather
     # than cropping to an assumed 32x16.
@@ -261,8 +311,13 @@ def main() -> None:
     enemy_images: dict[int, list] = {}
     enemy_masks: dict[int, list] = {}
     enemy_cells: dict[int, tuple[int, int]] = {}
+    enemy_images_left: dict[int, list] = {}
+    enemy_masks_left: dict[int, list] = {}
     for event_id, frames in event_sprites.items():
-        cw, ch = cell_size(frames)
+        left_frames = event_sprites_left.get(event_id, [])
+        # Both facings share one cell size, so nothing shifts when direction
+        # flips mid-walk.
+        cw, ch = cell_size(frames + left_frames)
         enemy_cells[event_id] = (cw, ch)
         images, masks = [], []
         for sprite in frames:
@@ -271,26 +326,35 @@ def main() -> None:
             masks.append(mask)
         enemy_images[event_id] = images
         enemy_masks[event_id] = masks
+        if left_frames:
+            limages, lmasks = [], []
+            for sprite in left_frames:
+                image, mask = sprite_to_image(sprite, source_palette, cw, ch)
+                limages.append(image)
+                lmasks.append(mask)
+            enemy_images_left[event_id] = limages
+            enemy_masks_left[event_id] = lmasks
 
-    flat_enemy = [im for images in enemy_images.values() for im in images]
+    flat_enemy = ([im for images in enemy_images.values() for im in images] +
+                  [im for images in enemy_images_left.values() for im in images])
     # One shared 15-colour line: the Genesis has four palette lines and the
     # font, level and sky already take three, so Jazz and every enemy must fit
     # the same line.  Choosing the palette across all of them at once is what
     # keeps the enemies from coming out miscoloured.
-    palette = choose_palette(terrain_images + player_images + spring_images + flat_enemy)
+    palette = choose_palette(terrain_images + flat_player + spring_images + flat_enemy)
     world_words: list[int] = []
     for image, mask in zip(terrain_images, terrain_masks):
         world_words.extend(encode_tile(quantize_pixels(image, palette, mask)))
 
     player_words: list[int] = []
-    for player_image, player_mask in zip(player_images, player_masks):
-        player_indices = quantize_pixels(player_image, palette, player_mask)
-        # Genesis VDP multi-tile sprites fetch tiles down each column before
-        # advancing to the next column (not normal image row-major ordering).
-        for tx in range(4):
-            for ty in range(4):
-                block = [player_indices[(ty * 8 + y) * 32 + tx * 8 + x] for y in range(8) for x in range(8)]
-                player_words.extend(encode_tile(block))
+    player_descriptors: list[tuple[int, int, int, int]] = []
+    for images, masks, (cw, ch) in zip(player_state_images, player_state_masks, player_state_cells):
+        base = len(player_words) // 8
+        for image, mask in zip(images, masks):
+            player_words.extend(encode_sprite_tiles(quantize_pixels(image, palette, mask), cw, ch))
+        player_descriptors.append((base, len(images), cw // 8, ch // 8))
+    # Player states carry no separate left art (the ROM flips Jazz), so the
+    # fifth Jj1EventSprite field just mirrors the base.
 
     spring_words: list[int] = []
     for spring_image, spring_mask in zip(spring_images, spring_masks):
@@ -301,13 +365,21 @@ def main() -> None:
                 spring_words.extend(encode_tile(block))
 
     enemy_words: list[int] = []
-    descriptors: dict[int, tuple[int, int, int, int]] = {}
+    descriptors: dict[int, tuple[int, int, int, int, int]] = {}
     for event_id, images in enemy_images.items():
         cw, ch = enemy_cells[event_id]
         base = len(enemy_words) // 8      # 8 u32 words per tile
         for image, mask in zip(images, enemy_masks[event_id]):
             enemy_words.extend(encode_sprite_tiles(quantize_pixels(image, palette, mask), cw, ch))
-        descriptors[event_id] = (base, len(images), cw // 8, ch // 8)
+        # A distinct left-facing set follows immediately, if any; otherwise the
+        # left offset equals the right (the ROM then hardware-flips nothing and
+        # simply reuses the one set, matching a symmetric or single-facing enemy).
+        left_base = base
+        if event_id in enemy_images_left:
+            left_base = len(enemy_words) // 8
+            for image, mask in zip(enemy_images_left[event_id], enemy_masks_left[event_id]):
+                enemy_words.extend(encode_sprite_tiles(quantize_pixels(image, palette, mask), cw, ch))
+        descriptors[event_id] = (base, len(images), cw // 8, ch // 8, left_base)
 
     per_frame = {e: (d[2] * d[3]) for e, d in descriptors.items()}
     biggest = max(per_frame.values())
@@ -341,6 +413,14 @@ def main() -> None:
         output += [emit_u32_array("jazz_world_tiles", world_words), ""]
     output += [
         emit_u32_array(f"{n}_player_tiles", player_words), "",
+        "/* [state] = { first tile, frames, tiles wide, tiles high }, one per",
+        "   JJ1_PLAYER_* state, resolved from the level's MT_P_ANIMS block. */",
+        f"const Jj1EventSprite {n}_player_states[JJ1_PLAYER_STATES] = {{",
+    ]
+    for state, (base, frames, tw, th) in enumerate(player_descriptors):
+        output.append(f"    [{state}] = {{ {base}, {frames}, {tw}, {th}, {base} }},")
+    output.append("};")
+    output += [
         emit_u32_array(f"{n}_spring_tiles", spring_words), "",
         f"const u16 {n}_pal1[16] = {{",
         "    RGB3_3_3_TO_VDPCOLOR(0,0,0),",
@@ -355,13 +435,14 @@ def main() -> None:
         "#define JJ1_HAVE_ORIGINAL_ENEMY_SPRITES 1",
         emit_u32_array(f"{n}_event_sprite_tiles", enemy_words),
         "",
-        "/* [event id] = { first tile, frames, tiles wide, tiles high }.  Frames",
-        "   are stored as up to 2x2 chunks of at most 4x4 tiles, column-major",
-        "   within each chunk: one hardware sprite per chunk. */",
+        "/* [event id] = { first tile, frames, tiles wide, tiles high, left tile }.",
+        "   JJ1 stores separate art per travel direction; `left` is the tile base",
+        "   of the left-facing set (equal to the first tile when the enemy has no",
+        "   distinct left art).  The ROM picks by direction and never H-flips. */",
         f"const Jj1EventSprite {n}_event_sprites[128] = {{",
     ]
-    for event_id, (base, frames, tw, th) in sorted(descriptors.items()):
-        output.append(f"    [{event_id}] = {{ {base}, {frames}, {tw}, {th} }},")
+    for event_id, (base, frames, tw, th, left_base) in sorted(descriptors.items()):
+        output.append(f"    [{event_id}] = {{ {base}, {frames}, {tw}, {th}, {left_base} }},")
     output.append("};")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(output) + "\n")

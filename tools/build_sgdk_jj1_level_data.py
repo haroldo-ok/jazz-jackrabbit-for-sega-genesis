@@ -54,8 +54,13 @@ def array(name: str, ctype: str, values: list[int], per_line: int, fmt: str) -> 
     return "\n".join(lines)
 
 
-def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int, bytes]:
-    """Mirror JJ1Level::load record skips through mask/start-coordinate data."""
+def runtime_records(level_path: Path):
+    """Mirror JJ1Level::load record skips through mask/start-coordinate data.
+
+    Returns (grid, masks, eventset, start_x, start_y, anims, player_anims),
+    where player_anims is the 38 animation indices the level assigns to Jazz's
+    animation states (PA_LWALK..PA_LSPRING), read from the MT_P_ANIMS block.
+    """
     r = Reader(level_path.read_bytes())
     r.seek(39)
     grid = r.rle(256 * 64 * 2)
@@ -79,12 +84,23 @@ def runtime_records(level_path: Path) -> tuple[bytes, bytes, bytes, int, int, by
     r.skip(39)                  # editor tileset names
     start_x = r.u16()
     start_y = r.u16() + 1
-    return grid, masks, eventset, start_x, start_y, anims
+    # After the start coordinates: JJ1Level::load reads a couple of bytes,
+    # jump height, water level, anim speed, then the player animation set.
+    r.skip(2)                   # l, w bytes
+    r.skip(2)                   # jump height (short)
+    r.skip(2)                   # padding seek(2)
+    r.skip(2)                   # water level target (short)
+    r.skip(1)                   # anim speed (char)
+    r.skip(2)                   # padding seek(2)
+    JJ1PANIMS = 38
+    player_anim_block = r.rle(JJ1PANIMS * 2)
+    player_anims = [player_anim_block[i << 1] for i in range(JJ1PANIMS)]
+    return grid, masks, eventset, start_x, start_y, anims, player_anims
 
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
 CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
-    CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT = range(9)
+    CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE = range(10)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO = range(5)
 
 
@@ -107,6 +123,16 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     # marks the same events as harmless to touch.
     if movement == 21:
         return CLASS_DESTRUCT, 0, min(points * 10 // 25, 255), max(1, min(strength, 255))
+
+    # Sucker tubes (Tubelectric): the engine pushes the player horizontally at
+    # magnitude * F40 >> 6.  In the port's 8.8 model that is magnitude * 171
+    # per frame; store the signed byte and let the runtime scale it, so the
+    # sign (left/right) and speed both come straight from the data.  strength
+    # (multiB) selects vertical variants we don't model, so only the plain
+    # horizontal tube (multiB == 0) becomes a TUBE.
+    if movement in (37, 38) and strength == 0:
+        return CLASS_TUBE, magnitude & 0xFF, 0, 0
+
     if modifier == 7:
         return CLASS_NONE, 0, 0, 0
 
@@ -141,6 +167,12 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         37: ITEM_SCORE,      # diamond
     }.get(modifier)
     if item is not None:
+        # Ammo pickups also select a weapon: encode the shot type in `param` so
+        # collecting one switches Jazz's shot (0 blaster, 1 toaster, 2 rising,
+        # 3 bouncer).  The distinct ammo modifiers group by weapon crate.
+        if item == ITEM_AMMO:
+            shot = {12: 1, 15: 1, 16: 2, 17: 3, 18: 2, 19: 1, 20: 3, 39: 2, 40: 3}.get(modifier, 1)
+            return CLASS_ITEM, (ITEM_AMMO | (shot << 4)), min(points * 10 // 25, 255), 0
         return CLASS_ITEM, item, min(points * 10 // 25, 255), 0
     if points:
         return CLASS_ITEM, ITEM_SCORE, min(points * 10 // 25, 255), 0
@@ -198,7 +230,7 @@ def main() -> None:
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, eventset, start_x, start_y, _anims = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])

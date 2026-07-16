@@ -52,6 +52,9 @@ u8 jj1_runtime_down_point_solid(u8 stage, s16 x, s16 y);
 u8 jj1_runtime_rect_solid(u8 stage, s16 x, s16 y, s16 w, s16 h);
 u8 jj1_runtime_solid(u8 stage, s16 tx, s16 ty);
 u16 jj1_runtime_spring_height(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *springTopY);
+/* Sucker-tube push (8.8 px/frame) following the tube's own orientation.
+ * Fills the pushX and pushY outputs, returning non-zero when inside a tube. */
+u8 jj1_runtime_tube_push(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *pushX, s16 *pushY);
 u8 jj1_runtime_touches_end(u8 stage, s16 x, s16 y, s16 w, s16 h);
 void jj1_runtime_place_player(JazzGame *state, u8 stage);
 

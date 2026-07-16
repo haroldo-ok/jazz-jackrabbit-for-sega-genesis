@@ -204,6 +204,8 @@ static void build_stage(JazzGame *g, u8 stage)
     g->player.vy = 0;
     g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
     g->player.springJump = 0;
+    g->player.shotType = JAZZ_SHOT_BLASTER;
+    g->player.inTube = 0;
     g->player.facing = 1;
     g->player.onGround = 1;
 
@@ -382,15 +384,41 @@ static void move_player_y(JazzGame *g, s8 amount)
     }
 }
 
+/* Per-type shot parameters, derived from the level's bullet definitions:
+ * blaster (straight, slow), toaster (straight, fast), rising (angled up),
+ * bouncer (arcs under gravity and reflects off surfaces).  Speeds are 8.8. */
+static void shot_params(u8 type, s16 *vx, s16 *vy, s8 *gravity, u8 *behaviour)
+{
+    switch (type) {
+    case JAZZ_SHOT_TOASTER: *vx = 1300; *vy = 0;    *gravity = 0; *behaviour = 0; break;
+    case JAZZ_SHOT_RISING:  *vx = 1300; *vy = -256; *gravity = 0; *behaviour = 0; break;
+    case JAZZ_SHOT_BOUNCER: *vx = 700;  *vy = -768; *gravity = 24; *behaviour = 4; break;
+    case JAZZ_SHOT_BLASTER:
+    default:                *vx = 1300; *vy = 0;    *gravity = 0; *behaviour = 0; break;
+    }
+}
+
+static s8 consume_subpixels(s16 velocity, s16 *acc);
+
 static void fire_bullet(JazzGame *g)
 {
     u8 i;
     for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
         if (!g->bullets[i].active) {
-            g->bullets[i].active = 1;
-            g->bullets[i].x = g->player.x + (g->player.facing ? PLAYER_W : -2);
-            g->bullets[i].y = g->player.y + 9;
-            g->bullets[i].vx = g->player.facing ? 5 : -5;
+            s16 vx, vy;
+            s8 gravity;
+            u8 behaviour;
+            JazzBullet *b = &g->bullets[i];
+            shot_params(g->player.shotType, &vx, &vy, &gravity, &behaviour);
+            b->active = 1;
+            b->x = g->player.x + (g->player.facing ? PLAYER_W : -2);
+            b->y = g->player.y + 9;
+            b->vx = g->player.facing ? vx : (s16)-vx;
+            b->vy = vy;
+            b->subX = 0;
+            b->subY = 0;
+            b->gravity = gravity;
+            b->behaviour = behaviour;
             g->fireCooldown = 10;
             g->events |= JAZZ_EVENT_FIRE;
             return;
@@ -460,16 +488,38 @@ static void update_bullets(JazzGame *g)
     u8 i, e;
     JazzBullet *b;
     for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
+        s8 dx, dy;
         b = &g->bullets[i];
         if (!b->active) continue;
-        b->x += b->vx;
+
+        /* Gravity acts on arcing shots (the bouncer). */
+        if (b->gravity) b->vy = (s16)(b->vy + b->gravity);
+
+        dx = consume_subpixels(b->vx, &b->subX);
+        dy = consume_subpixels(b->vy, &b->subY);
+        b->x = (s16)(b->x + dx);
+        b->y = (s16)(b->y + dy);
+
         if (rect_hits_solid(g, b->x, b->y, 4, 4)) {
-            b->active = 0;
+            if (b->behaviour == 4) {
+                /* Bouncer: reflect off the surface it struck instead of dying.
+                   Undo the step, flip the velocity component that hit, and damp
+                   it slightly so the bounce loses energy like the original. */
+                b->x = (s16)(b->x - dx);
+                b->y = (s16)(b->y - dy);
+                if (rect_hits_solid(g, (s16)(b->x + dx), b->y, 4, 4)) b->vx = (s16)-b->vx;
+                if (rect_hits_solid(g, b->x, (s16)(b->y + dy), 4, 4)) {
+                    b->vy = (s16)(-b->vy - (b->vy >> 2));
+                    if (b->vy > -200 && b->vy < 200) b->vy = -400; /* keep it lively */
+                }
+            } else {
+                b->active = 0;
 #ifdef JAZZ_JJ1_RUNTIME
-            /* Probe slightly ahead: the bullet stops at the block's edge. */
-            bullet_hits_scenery(g, (s16)(b->x + ((b->vx > 0) ? 3 : 0)), (s16)(b->y + 2));
+                /* Probe slightly ahead: the bullet stops at the block's edge. */
+                bullet_hits_scenery(g, (s16)(b->x + ((b->vx > 0) ? 3 : 0)), (s16)(b->y + 2));
 #endif
-            continue;
+                continue;
+            }
         }
         if ((b->x < g->player.x - 400) || (b->x > g->player.x + 400)) { b->active = 0; continue; }
         for (e = 0; e < JAZZ_MAX_ENEMIES; e++) {
@@ -589,12 +639,16 @@ static void collect_grid_items(JazzGame *g)
             g->stageGems++;
             g->score += (u16)info->points * 25;
             g->events |= JAZZ_EVENT_GEM;
-            if (info->param == JJ1_ITEM_HEALTH) {
+            if ((info->param & 0x0F) == JJ1_ITEM_HEALTH) {
                 if (g->health < 5) g->health++;
                 g->events |= JAZZ_EVENT_HEALTH;
-            } else if (info->param == JJ1_ITEM_LIFE) {
+            } else if ((info->param & 0x0F) == JJ1_ITEM_LIFE) {
                 if (g->lives < 9) g->lives++;
                 g->events |= JAZZ_EVENT_LIFE;
+            } else if ((info->param & 0x0F) == JJ1_ITEM_AMMO) {
+                /* The weapon crate carries the shot type in the high nibble. */
+                u8 shot = (u8)((info->param >> 4) & 0x0F);
+                if (shot < JAZZ_SHOT_TYPES) g->player.shotType = shot;
             }
         }
     }
@@ -691,6 +745,36 @@ s16 jazz_player_feet(const JazzGame *g)
 {
     return (s16)(g->player.y + PLAYER_H);
 }
+
+/* Choose the animation state from physics, following the order the original
+ * uses in JJ1LevelPlayer::animate: hurt/spring first, then airborne, then the
+ * ground states (run/skid/shoot/crouch/lookup/walk/stand). */
+u8 jazz_player_anim_state(const JazzGame *g, u16 input)
+{
+    const JazzPlayer *p = &g->player;
+    s16 speed = (p->vx < 0) ? -p->vx : p->vx;
+
+    if (g->invulnerability && !p->onGround) return JJ1_PLAYER_HURT;
+    if (p->springJump) return JJ1_PLAYER_SPRING;
+
+    if (!p->onGround) {
+        if (p->vy < 0) return JJ1_PLAYER_JUMP;
+        return JJ1_PLAYER_FALL;
+    }
+
+    /* Firing while grounded shows the shoot pose. */
+    if (g->fireCooldown && speed < JAZZ_PXS_WALK) return JJ1_PLAYER_SHOOT;
+
+    if (speed >= JAZZ_PXS_RUN) return JJ1_PLAYER_RUN;
+    /* Pressing away from current motion is a skid/turn. */
+    if (((p->vx > 0) && (input & JAZZ_INPUT_LEFT)) ||
+        ((p->vx < 0) && (input & JAZZ_INPUT_RIGHT)))
+        return JJ1_PLAYER_SKID;
+    if (speed >= JAZZ_PXA_WALK) return JJ1_PLAYER_WALK;
+
+    if (input & JAZZ_INPUT_JUMP) return JJ1_PLAYER_LOOKUP; /* up held: look up */
+    return JJ1_PLAYER_STAND;
+}
 #endif
 
 /* Horizontal control: two-tier acceleration toward walk speed, then run
@@ -725,6 +809,14 @@ static void accelerate_player(JazzGame *g, u16 input)
 static void integrate_vertical(JazzGame *g, u16 input)
 {
     JazzPlayer *p = &g->player;
+
+    /* A vertical sucker tube fully controls vy this frame; the tube push has
+       already set it, so skip jump/gravity handling entirely. */
+    if (p->inTube && p->vy != JAZZ_PYS_FALL && p->jumpTargetY == JAZZ_NO_JUMP_TARGET) {
+        s16 pushY = 0, pushX = 0;
+        if (jj1_runtime_tube_push(g->stage, p->x, p->y, PLAYER_W, PLAYER_H, &pushX, &pushY) && pushY)
+            return;
+    }
 
     if ((input & JAZZ_INPUT_JUMP) && p->onGround &&
         (p->jumpTargetY == JAZZ_NO_JUMP_TARGET) &&
@@ -793,6 +885,37 @@ void jazz_step(JazzGame *g, u16 input)
     }
 
     accelerate_player(g, input);
+#ifdef JAZZ_JJ1_RUNTIME
+    {
+        /* Sucker tubes push the player along the tube.  The direction follows
+           the tube's shape: a horizontal run pushes left/right, a vertical
+           shaft pushes up/down.  As in the original, a flow faster than walking
+           fully controls the player; a slower one can be walked against. */
+        s16 pushX = 0, pushY = 0;
+        g->player.inTube = 0;
+        if (jj1_runtime_tube_push(g->stage, g->player.x, g->player.y,
+                                  PLAYER_W, PLAYER_H, &pushX, &pushY)) {
+            g->player.inTube = 1;
+            if (pushX) {
+                s16 mag = (pushX < 0) ? -pushX : pushX;
+                u8 against = ((pushX < 0) && (input & JAZZ_INPUT_RIGHT)) ||
+                             ((pushX > 0) && (input & JAZZ_INPUT_LEFT));
+                if (mag >= JAZZ_PXS_WALK || !against) {
+                    g->player.vx = pushX;
+                    if (pushX > 0) g->player.facing = 1;
+                    else if (pushX < 0) g->player.facing = 0;
+                }
+            }
+            if (pushY) {
+                /* Vertical shaft: drive the player up/down the tube and skip the
+                   normal gravity/jump integration this frame. */
+                g->player.vy = pushY;
+                g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
+                g->player.springJump = 0;
+            }
+        }
+    }
+#endif
     integrate_vertical(g, input);
     g->previousInput = input;
 
