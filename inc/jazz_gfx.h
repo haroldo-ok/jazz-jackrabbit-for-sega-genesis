@@ -47,7 +47,16 @@
 #define T_ENEMY_FLY  (T_ENEMY_WALK + (2 * JJ1_WALKER_FRAME_TILES))
 #define JJ1_FLYER_FRAME_TILES 4
 #define T_ENEMY_HAZARD (T_ENEMY_FLY + (2 * JJ1_FLYER_FRAME_TILES))
-#define T_GEM        (T_ENEMY_BASE + (JJ1_ENEMY_SLOTS * JJ1_ENEMY_SLOT_TILES))
+/* Uncollected items are drawn with their real extracted sprite, streamed into
+ * a small keyed pool: only a few *distinct* item types are ever on screen at
+ * once (a run of diskettes, a couple of carrots), so each distinct event id
+ * gets a slot and the frame is uploaded once.  Slots are capped at 4x4 tiles;
+ * the rare larger pickup draws its top-left 4x4.  This is what lets diskettes,
+ * carrots and ammo crates look like themselves instead of a generic gem. */
+#define JJ1_ITEM_SLOTS 2
+#define JJ1_ITEM_SLOT_TILES 16
+#define T_ITEM_BASE  (T_ENEMY_BASE + (JJ1_ENEMY_SLOTS * JJ1_ENEMY_SLOT_TILES))
+#define T_GEM        (T_ITEM_BASE + (JJ1_ITEM_SLOTS * JJ1_ITEM_SLOT_TILES))
 #define T_BULLET     (T_GEM + 1)
 #define T_JJ1_SKY    (T_BULLET + 1)
 #define T_JJ1_LEVEL0_SCREEN (T_JJ1_SKY + 8)

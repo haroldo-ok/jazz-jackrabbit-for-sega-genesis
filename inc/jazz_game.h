@@ -35,7 +35,7 @@ typedef int32_t s32;
 #define JAZZ_ENEMY_W 14
 #define JAZZ_ENEMY_H 16
 #define JAZZ_MAX_GEMS 24
-#define JAZZ_MAX_BULLETS 4
+#define JAZZ_MAX_BULLETS 6   /* room for the missile's up+down pair per shot */
 #define JAZZ_STAGE_COUNT 8   /* all eight shareware levels */
 
 /* Player animation states, mapped from the original PA_ indices.  Kept here
@@ -58,6 +58,7 @@ typedef int32_t s32;
 #define JAZZ_INPUT_JUMP  0x0004
 #define JAZZ_INPUT_FIRE  0x0008
 #define JAZZ_INPUT_START 0x0010
+#define JAZZ_INPUT_SWITCH 0x0020   /* cycle to the next available weapon */
 
 #define JAZZ_TILE_EMPTY    0
 #define JAZZ_TILE_SOLID    1
@@ -104,6 +105,7 @@ typedef struct {
     u8 onGround;
     u8 springJump;     /* current ascent came from a spring: ignore button */
     u8 shotType;       /* JAZZ_SHOT_*; blaster by default */
+    u8 weaponsOwned;   /* bitmask of collected shot types (blaster always set) */
     u8 inTube;         /* inside a sucker tube this frame: tube drives motion */
 } JazzPlayer;
 
@@ -127,13 +129,14 @@ typedef struct {
     u8 active;
 } JazzBullet;
 
-/* Player shot types, mapped from the level's bullet definitions.  The default
- * blaster is always available; the others come from ammo pickups. */
-#define JAZZ_SHOT_BLASTER 0
-#define JAZZ_SHOT_TOASTER 1
-#define JAZZ_SHOT_RISING  2
-#define JAZZ_SHOT_BOUNCER 3
-#define JAZZ_SHOT_TYPES   4
+/* Player shot types, mapped from the level's bullet definitions (bulletSet):
+ * the default blaster plus four weapons granted by ammo crates. */
+#define JAZZ_SHOT_BLASTER 0   /* straight, slow */
+#define JAZZ_SHOT_TOASTER 1   /* straight, fast */
+#define JAZZ_SHOT_UPWARD  2   /* fast, angled up */
+#define JAZZ_SHOT_BOUNCER 3   /* arcs under gravity, reflects off surfaces */
+#define JAZZ_SHOT_SPECIAL 4   /* fourth weapon crate */
+#define JAZZ_SHOT_TYPES   5
 
 typedef struct {
     s16 x, y;

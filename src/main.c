@@ -38,8 +38,9 @@ static u16 input_from_pad(u16 pad)
     u16 input = 0;
     if (pad & BUTTON_LEFT) input |= JAZZ_INPUT_LEFT;
     if (pad & BUTTON_RIGHT) input |= JAZZ_INPUT_RIGHT;
-    if (pad & (BUTTON_B | BUTTON_C)) input |= JAZZ_INPUT_JUMP;
+    if (pad & BUTTON_B) input |= JAZZ_INPUT_JUMP;
     if (pad & BUTTON_A) input |= JAZZ_INPUT_FIRE;
+    if (pad & BUTTON_C) input |= JAZZ_INPUT_SWITCH;   /* cycle weapons */
     if (pad & BUTTON_START) input |= JAZZ_INPUT_START;
     return input;
 }
@@ -117,8 +118,14 @@ static void draw_status_line(const JazzGame *g)
             "HP:***   ", "HP:****  ", "HP:***** "
         };
         const char *text = healthText[(g->health < 6) ? g->health : 5];
-        const char *keys = " A FIRE  B/C JUMP  START PAUSE";
+        static const char *const weaponText[JAZZ_SHOT_TYPES] = {
+            "WPN:BLAST ", "WPN:TOAST ", "WPN:UP    ", "WPN:BOUNCE", "WPN:SPCL  "
+        };
+        const char *wpn = weaponText[(g->player.shotType < JAZZ_SHOT_TYPES) ?
+                                     g->player.shotType : 0];
+        const char *keys = "  A FIRE B JUMP C WPN";
         while (*text) line[pos++] = *text++;
+        while (*wpn) line[pos++] = *wpn++;
         while (*keys) line[pos++] = *keys++;
     }
     hud_pad(line, pos);
@@ -374,16 +381,22 @@ static void put_sprite(u16 *count, s16 x, s16 y, u8 size, u16 attr)
     }
 }
 
+/* Which event id each item VRAM slot currently holds; 0xFF = free. */
+static u8 itemSlotEvent[JJ1_ITEM_SLOTS];
+
 /* Springs and uncollected items are drawn straight from the original event
  * grid within the visible 11x8 block window; the taken bitmap hides
- * collected cells. */
+ * collected cells.  Items use their real extracted sprite, streamed into a
+ * small pool keyed by event id so a run of identical pickups shares one slot. */
 static void render_jj1_events(u16 *count)
 {
     s16 sx, sy;
+    u8 i;
+    for (i = 0; i < JJ1_ITEM_SLOTS; i++) itemSlotEvent[i] = 0xFF;
     for (sy = jj1MapOriginY; sy < jj1MapOriginY + 8; sy++) {
         for (sx = jj1MapOriginX; sx < jj1MapOriginX + 11; sx++) {
-            const Jj1EventInfo *info =
-                jj1_event_info(game.stage, jj1_runtime_event(game.stage, sx, sy));
+            u8 id = jj1_runtime_event(game.stage, sx, sy);
+            const Jj1EventInfo *info = jj1_event_info(game.stage, id);
             if (info->klass == JJ1_CLASS_SPRING) {
                 /* param carries the launch magnitude; bucket it into the
                    three visual strengths. */
@@ -393,8 +406,46 @@ static void render_jj1_events(u16 *count)
                     T_SPRING + (variant * JJ1_SPRING_TILES_PER_VARIANT)));
             } else if ((info->klass == JJ1_CLASS_ITEM) &&
                        !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
-                put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
-                    SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
+                const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
+                if (art && art->frames &&
+                    (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {
+                    /* Find (or claim) a slot for this item type.  The whole cell
+                       is uploaded, so the column-major tile order stays intact. */
+                    u16 cellW = (u16)(art->tilesW << 3);
+                    u16 cellH = (u16)(art->tilesH << 3);
+                    u8 slot = 0xFF, s;
+                    u8 frame = (u8)((game.frame >> 3) % art->frames);
+                    for (s = 0; s < JJ1_ITEM_SLOTS; s++)
+                        if (itemSlotEvent[s] == id) { slot = s; break; }
+                    if (slot == 0xFF)
+                        for (s = 0; s < JJ1_ITEM_SLOTS; s++)
+                            if (itemSlotEvent[s] == 0xFF) {
+                                slot = s;
+                                itemSlotEvent[s] = id;
+                                VDP_loadTileData(stageArt->spriteTiles +
+                                    ((u32)(art->tile + (frame * art->tilesW * art->tilesH)) * 8),
+                                    T_ITEM_BASE + (s * JJ1_ITEM_SLOT_TILES),
+                                    (u16)(art->tilesW * art->tilesH), DMA);
+                                break;
+                            }
+                    if (slot != 0xFF) {
+                        put_sprite(count,
+                            (sx << 5) - cameraX + (s16)((32 - cellW) >> 1),
+                            (sy << 5) - cameraY + (s16)((32 - cellH) >> 1),
+                            SPRITE_SIZE(art->tilesW, art->tilesH),
+                            TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
+                                           T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES)));
+                    } else {
+                        /* Pool exhausted (more distinct item types on screen
+                           than slots): fall back to the gem dot. */
+                        put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
+                            SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
+                    }
+                } else {
+                    /* Item with no sprite, or one too large for a slot. */
+                    put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
+                        SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
+                }
             }
         }
     }
@@ -577,7 +628,7 @@ static void show_title(void)
     VDP_drawTextBG(WINDOW, "GENESIS HOME PORT", 10, 9);
     VDP_drawTextBG(WINDOW, "SGDK PLAYABLE PROTOTYPE", 7, 13);
     VDP_drawTextBG(WINDOW, "START: PLAY", 13, 18);
-    VDP_drawTextBG(WINDOW, "D-PAD RUN    A FIRE", 10, 21);
+    VDP_drawTextBG(WINDOW, "D-PAD RUN  A FIRE C WEAPON", 7, 21);
     VDP_drawTextBG(WINDOW, "B OR C JUMP  START PAUSE", 6, 23);
     VDP_drawTextBG(WINDOW, "JJ1 SHAREWARE ASSET BUILD", 7, 26);
     draw_level_select();

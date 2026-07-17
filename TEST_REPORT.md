@@ -36,6 +36,27 @@
 
 ## Fixes in this pass
 
+- **Vertical sucker tubes launch the player upward.** The direction is in the
+  event data, not the geometry: movement 37/38 with multiB != 0 and multiA > 0
+  is a vertical repel that lifts the player to targetY = gridY - multiA*3 px,
+  as OpenJazz's REPELUP does. The importer reads multiA/multiB and classifies
+  vertical launches (launch height in the event strength); the runtime drives
+  the climb through the spring's target-height ascent, so the player rides the
+  shaft and clears the top instead of sticking. Verified on the host: a 10-tile
+  rise up a real Tubelectric shaft with no input.
+- **Weapon behaviours corrected against OpenJazz.** The bullet table and the
+  addAmmo() map give the authoritative weapons: modifier 15/18 -> fast straight,
+  16/19 -> fast angled up, 17/20 -> gravity bouncer (behaviour 4), 39/40 ->
+  fourth weapon. Five shot types with parameters read from the bullet defs.
+- **Weapon-switch button.** C cycles through collected weapons (B jump, A fire).
+  Jazz tracks owned weapons; ammo crates grant and switch to them; the switch is
+  edge-triggered and skips unowned weapons. The HUD shows the current weapon.
+- **Pickups** (carrots, gems, ammo, extra life, shields, score) resolve through
+  the event->anim->sprite chain and their effects match OpenJazz's setEvent.
+- **Music**: the four converted VGMs (menu, Diamondus, Tubelectric, Medivo) play
+  per world via SGDK's XGM driver. ROM is 3.5MB, within the 4MB cart ceiling.
+
+
 - **Vertical sucker tubes.** The Tubelectric tube events all carry a horizontal
   magnitude byte, but the same event is laid down vertical shafts and horizontal
   runs (211 of 332 tube cells are vertical). The push now follows the tube's
