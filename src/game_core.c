@@ -205,6 +205,7 @@ static void build_stage(JazzGame *g, u8 stage)
     g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
     g->player.springJump = 0;
     g->player.shotType = JAZZ_SHOT_BLASTER;
+    g->player.weaponsOwned = (u8)(1 << JAZZ_SHOT_BLASTER);
     g->player.inTube = 0;
     g->player.facing = 1;
     g->player.onGround = 1;
@@ -384,46 +385,64 @@ static void move_player_y(JazzGame *g, s8 amount)
     }
 }
 
-/* Per-type shot parameters, derived from the level's bullet definitions:
- * blaster (straight, slow), toaster (straight, fast), rising (angled up),
- * bouncer (arcs under gravity and reflects off surfaces).  Speeds are 8.8. */
-static void shot_params(u8 type, s16 *vx, s16 *vy, s8 *gravity, u8 *behaviour)
+/* Per-type shot parameters, derived from the level's bullet table (xspeed,
+ * yspeed, gravity, behaviour).  Speeds are 8.8 px/frame; the bouncer arcs and
+ * reflects off surfaces (behaviour 4). */
+/* A weapon can fire a second projectile at once (the missile fires one angled
+ * up and one angled down).  shot_params fills the primary velocity, and when
+ * *vy2 differs from *vy the caller spawns a second bullet with (*vx, *vy2).
+ * JAZZ_NO_SECOND means the weapon fires a single projectile. */
+#define JAZZ_NO_SECOND 0x7FFF
+
+static void shot_params(u8 type, s16 *vx, s16 *vy, s16 *vy2,
+                        s8 *gravity, u8 *behaviour)
 {
+    *vy2 = JAZZ_NO_SECOND;
     switch (type) {
-    case JAZZ_SHOT_TOASTER: *vx = 1300; *vy = 0;    *gravity = 0; *behaviour = 0; break;
-    case JAZZ_SHOT_RISING:  *vx = 1300; *vy = -256; *gravity = 0; *behaviour = 0; break;
+    case JAZZ_SHOT_TOASTER: *vx = 1400; *vy = 0;    *gravity = 0;  *behaviour = 0; break;
+    case JAZZ_SHOT_UPWARD:  /* missile: fires up AND down at once */
+                            *vx = 1400; *vy = -256; *vy2 = 256; *gravity = 0; *behaviour = 0; break;
     case JAZZ_SHOT_BOUNCER: *vx = 700;  *vy = -768; *gravity = 24; *behaviour = 4; break;
+    case JAZZ_SHOT_SPECIAL: *vx = 1600; *vy = 0;    *gravity = 0;  *behaviour = 0; break;
     case JAZZ_SHOT_BLASTER:
-    default:                *vx = 1300; *vy = 0;    *gravity = 0; *behaviour = 0; break;
+    default:                *vx = 1000; *vy = 0;    *gravity = 0;  *behaviour = 0; break;
     }
 }
 
 static s8 consume_subpixels(s16 velocity, s16 *acc);
 
-static void fire_bullet(JazzGame *g)
+/* Spawn one projectile into a free slot; returns 0 if none free. */
+static u8 spawn_bullet(JazzGame *g, s16 vx, s16 vy, s8 gravity, u8 behaviour)
 {
     u8 i;
     for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
-        if (!g->bullets[i].active) {
-            s16 vx, vy;
-            s8 gravity;
-            u8 behaviour;
-            JazzBullet *b = &g->bullets[i];
-            shot_params(g->player.shotType, &vx, &vy, &gravity, &behaviour);
-            b->active = 1;
-            b->x = g->player.x + (g->player.facing ? PLAYER_W : -2);
-            b->y = g->player.y + 9;
-            b->vx = g->player.facing ? vx : (s16)-vx;
-            b->vy = vy;
-            b->subX = 0;
-            b->subY = 0;
-            b->gravity = gravity;
-            b->behaviour = behaviour;
-            g->fireCooldown = 10;
-            g->events |= JAZZ_EVENT_FIRE;
-            return;
-        }
+        JazzBullet *b = &g->bullets[i];
+        if (b->active) continue;
+        b->active = 1;
+        b->x = g->player.x + (g->player.facing ? PLAYER_W : -2);
+        b->y = g->player.y + 9;
+        b->vx = g->player.facing ? vx : (s16)-vx;
+        b->vy = vy;
+        b->subX = 0;
+        b->subY = 0;
+        b->gravity = gravity;
+        b->behaviour = behaviour;
+        return 1;
     }
+    return 0;
+}
+
+static void fire_bullet(JazzGame *g)
+{
+    s16 vx, vy, vy2;
+    s8 gravity;
+    u8 behaviour;
+    shot_params(g->player.shotType, &vx, &vy, &vy2, &gravity, &behaviour);
+    if (!spawn_bullet(g, vx, vy, gravity, behaviour)) return;
+    /* Spread weapons (the missile) fire a second projectile the same shot. */
+    if (vy2 != JAZZ_NO_SECOND) spawn_bullet(g, vx, vy2, gravity, behaviour);
+    g->fireCooldown = 10;
+    g->events |= JAZZ_EVENT_FIRE;
 }
 
 static void kill_enemy(JazzGame *g, JazzEnemy *e)
@@ -648,7 +667,10 @@ static void collect_grid_items(JazzGame *g)
             } else if ((info->param & 0x0F) == JJ1_ITEM_AMMO) {
                 /* The weapon crate carries the shot type in the high nibble. */
                 u8 shot = (u8)((info->param >> 4) & 0x0F);
-                if (shot < JAZZ_SHOT_TYPES) g->player.shotType = shot;
+                if (shot < JAZZ_SHOT_TYPES) {
+                    g->player.weaponsOwned |= (u8)(1 << shot);
+                    g->player.shotType = shot;
+                }
             }
         }
     }
@@ -810,14 +832,6 @@ static void integrate_vertical(JazzGame *g, u16 input)
 {
     JazzPlayer *p = &g->player;
 
-    /* A vertical sucker tube fully controls vy this frame; the tube push has
-       already set it, so skip jump/gravity handling entirely. */
-    if (p->inTube && p->vy != JAZZ_PYS_FALL && p->jumpTargetY == JAZZ_NO_JUMP_TARGET) {
-        s16 pushY = 0, pushX = 0;
-        if (jj1_runtime_tube_push(g->stage, p->x, p->y, PLAYER_W, PLAYER_H, &pushX, &pushY) && pushY)
-            return;
-    }
-
     if ((input & JAZZ_INPUT_JUMP) && p->onGround &&
         (p->jumpTargetY == JAZZ_NO_JUMP_TARGET) &&
         !(g->previousInput & JAZZ_INPUT_JUMP)) {
@@ -887,15 +901,17 @@ void jazz_step(JazzGame *g, u16 input)
     accelerate_player(g, input);
 #ifdef JAZZ_JJ1_RUNTIME
     {
-        /* Sucker tubes push the player along the tube.  The direction follows
-           the tube's shape: a horizontal run pushes left/right, a vertical
-           shaft pushes up/down.  As in the original, a flow faster than walking
-           fully controls the player; a slower one can be walked against. */
-        s16 pushX = 0, pushY = 0;
-        g->player.inTube = 0;
-        if (jj1_runtime_tube_push(g->stage, g->player.x, g->player.y,
-                                  PLAYER_W, PLAYER_H, &pushX, &pushY)) {
-            g->player.inTube = 1;
+        /* Sucker tubes.  A horizontal tube pushes left/right; a vertical tube
+           launches the player upward to a target height, exactly like the
+           original's REPELUP (which reuses the spring's target-height ascent).
+           Modelling the launch as a jump target - rather than a fixed upward
+           velocity - is what lets the player clear the shaft and fly out the
+           top instead of sticking at the tube's last cell. */
+        s16 pushX = 0, targetY = 0;
+        u8 kind = jj1_runtime_tube_push(g->stage, g->player.x, g->player.y,
+                                        PLAYER_W, PLAYER_H, &pushX, &targetY);
+        g->player.inTube = (kind != 0);
+        if (kind) {
             if (pushX) {
                 s16 mag = (pushX < 0) ? -pushX : pushX;
                 u8 against = ((pushX < 0) && (input & JAZZ_INPUT_RIGHT)) ||
@@ -906,12 +922,15 @@ void jazz_step(JazzGame *g, u16 input)
                     else if (pushX < 0) g->player.facing = 0;
                 }
             }
-            if (pushY) {
-                /* Vertical shaft: drive the player up/down the tube and skip the
-                   normal gravity/jump integration this frame. */
-                g->player.vy = pushY;
-                g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
-                g->player.springJump = 0;
+            if (kind == 2) {
+                /* Vertical launch: aim for the target height if we are not
+                   already above it.  springJump keeps the ascent going after
+                   the player leaves the tube cell, and blocks the button check
+                   from cancelling it. */
+                if (g->player.y > targetY) {
+                    g->player.jumpTargetY = targetY;
+                    g->player.springJump = 1;
+                }
             }
         }
     }
@@ -919,6 +938,18 @@ void jazz_step(JazzGame *g, u16 input)
     integrate_vertical(g, input);
     g->previousInput = input;
 
+    if (pressed & JAZZ_INPUT_SWITCH) {
+        /* Cycle to the next weapon the player actually owns. */
+        u8 next = g->player.shotType;
+        u8 tries;
+        for (tries = 0; tries < JAZZ_SHOT_TYPES; tries++) {
+            next = (u8)((next + 1) % JAZZ_SHOT_TYPES);
+            if (g->player.weaponsOwned & (u8)(1 << next)) {
+                g->player.shotType = next;
+                break;
+            }
+        }
+    }
     if ((pressed & JAZZ_INPUT_FIRE) && !g->fireCooldown) fire_bullet(g);
     if (g->fireCooldown) g->fireCooldown--;
     if (g->invulnerability) g->invulnerability--;

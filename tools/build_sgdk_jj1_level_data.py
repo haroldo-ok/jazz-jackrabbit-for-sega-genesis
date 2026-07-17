@@ -124,13 +124,27 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     if movement == 21:
         return CLASS_DESTRUCT, 0, min(points * 10 // 25, 255), max(1, min(strength, 255))
 
-    # Sucker tubes (Tubelectric): the engine pushes the player horizontally at
-    # magnitude * F40 >> 6.  In the port's 8.8 model that is magnitude * 171
-    # per frame; store the signed byte and let the runtime scale it, so the
-    # sign (left/right) and speed both come straight from the data.  strength
-    # (multiB) selects vertical variants we don't model, so only the plain
-    # horizontal tube (multiB == 0) becomes a TUBE.
-    if movement in (37, 38) and strength == 0:
+    # Sucker tubes (Tubelectric).  The engine (touchEvent, movement 37/38) has
+    # two forms, selected by multiB (byte 23):
+    #   multiB == 0            -> horizontal repel: push at magnitude * F40 >> 6,
+    #                             which is magnitude * 171 in the port's 8.8.
+    #   multiB != 0, multiA>0  -> vertical *launch*: lift the player to
+    #                             targetY = gridY - multiA*3 tiles, capped at
+    #                             multiA * F20 upward, with a magnitude-signed
+    #                             horizontal drift.  This is what makes the
+    #                             Tubelectric shafts fire the player upward.
+    # We keep both in CLASS_TUBE: `param` carries the signed horizontal
+    # magnitude, and `strength` carries the vertical launch height in tiles
+    # (0 for a plain horizontal tube).
+    if movement in (37, 38):
+        multi_a = record[22]
+        multi_b = record[23]
+        if multi_b and multi_a > 0:
+            return CLASS_TUBE, magnitude & 0xFF, 0, min(multi_a, 255)
+        if not multi_b:
+            return CLASS_TUBE, magnitude & 0xFF, 0, 0
+        # multiB set with multiA <= 0 is a downward repel; treat as horizontal
+        # drift only (the shareware levels don't use it for launches).
         return CLASS_TUBE, magnitude & 0xFF, 0, 0
 
     if modifier == 7:
@@ -167,11 +181,16 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         37: ITEM_SCORE,      # diamond
     }.get(modifier)
     if item is not None:
-        # Ammo pickups also select a weapon: encode the shot type in `param` so
-        # collecting one switches Jazz's shot (0 blaster, 1 toaster, 2 rising,
-        # 3 bouncer).  The distinct ammo modifiers group by weapon crate.
+        # Ammo pickups also select a weapon.  OpenJazz's setEvent maps each
+        # modifier to addAmmo(weaponType, count), and createBullet fires
+        # bulletSet[weaponType + 1]; the resulting behaviours (read from the
+        # bullet table) are: 0 -> fast straight (toaster), 1 -> fast angled up,
+        # 2 -> gravity bouncer, 3 -> special.  Encode the shot type in the
+        # param's high nibble so collecting a crate switches Jazz's weapon.
         if item == ITEM_AMMO:
-            shot = {12: 1, 15: 1, 16: 2, 17: 3, 18: 2, 19: 1, 20: 3, 39: 2, 40: 3}.get(modifier, 1)
+            weapon = {15: 0, 18: 0, 16: 1, 19: 1, 17: 2, 20: 2, 39: 3, 40: 3,
+                      12: 0}.get(modifier, 0)
+            shot = weapon + 1        # 0 is the default blaster
             return CLASS_ITEM, (ITEM_AMMO | (shot << 4)), min(points * 10 // 25, 255), 0
         return CLASS_ITEM, item, min(points * 10 // 25, 255), 0
     if points:
