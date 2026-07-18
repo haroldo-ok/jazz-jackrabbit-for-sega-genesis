@@ -27,7 +27,7 @@ fi
 
 # 2. Build the harness.
 cc -O2 -o "$TMP/libretro_harness" "$ROOT/tests/libretro_harness.c" \
-   -I"$TMP/gpgx/libretro/libretro-common/include" -ldl
+   -I"$TMP/gpgx/libretro/libretro-common/include" -ldl -lm
 
 # 3. Build the release ROM and the on-target self-test ROM.
 PATH="$GDK/bin:$PATH" make -C "$ROOT" clean GDK="$GDK" PREFIX="$PREFIX" >/dev/null
@@ -105,4 +105,28 @@ assert late_hud > 300, f"HUD lost after scrolling ({late_hud})"
 
 print(f"PASS: headless emulator P2P: hero={hero}, sky={sky}, terrain={terrain}, "
       f"anim={moved}, scrolled={scrolled}, deep_terrain={late_terrain}")
+PY
+
+# 6. Music: the XGM driver must actually be producing sound, on the title
+#    screen and in-game.  The harness only reports signal energy (RMS/peak),
+#    never audio, which is enough to catch a silent-music regression such as a
+#    bad VGM conversion, a missing resource, or a stalled Z80 driver.
+AUDIO_OUT="$("$TMP/libretro_harness" "$CORE" "$TMP/release.bin" 600 \
+  "audio@240,120-160:start,audio@560" "$ART/headless_audio_")"
+echo "$AUDIO_OUT" | grep '^AUDIO' || true
+
+python3 - <<PY
+import re, sys
+out = """$AUDIO_OUT"""
+rows = [(int(m.group(1)), float(m.group(2)), int(m.group(3)))
+        for m in re.finditer(r'^AUDIO (\d+) rms=([\d.]+) peak=(\d+)', out, re.M)]
+assert len(rows) >= 2, f"expected two audio windows, got {rows}"
+title_rms, title_peak = rows[0][1], rows[0][2]
+play_rms, play_peak = rows[1][1], rows[1][2]
+assert title_rms > 100 and title_peak > 1000, \
+    f"title music silent (rms={title_rms}, peak={title_peak})"
+assert play_rms > 100 and play_peak > 1000, \
+    f"in-game music silent (rms={play_rms}, peak={play_peak})"
+print(f"PASS: music plays (title rms={title_rms:.0f} peak={title_peak}, "
+      f"in-game rms={play_rms:.0f} peak={play_peak})")
 PY
