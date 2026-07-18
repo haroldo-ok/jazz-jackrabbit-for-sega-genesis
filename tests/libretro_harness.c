@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 #include "libretro.h"
 
 #define MAX_DIRECTIVES 64
@@ -30,7 +31,8 @@ typedef struct { unsigned frame; } ShotDirective;
 
 static HoldDirective holds[MAX_DIRECTIVES];
 static ShotDirective shots[MAX_DIRECTIVES];
-static unsigned holdCount, shotCount;
+static ShotDirective audios[MAX_DIRECTIVES];
+static unsigned holdCount, shotCount, audioCount;
 static unsigned currentFrame, totalFrames;
 static const char *outPrefix;
 
@@ -81,8 +83,41 @@ static void video_cb(const void *data, unsigned width, unsigned height, size_t p
                (const uint8_t *)data + y * pitch, (size_t)width * 2);
 }
 
-static void audio_cb(int16_t left, int16_t right) { (void)left; (void)right; }
-static size_t audio_batch_cb(const int16_t *data, size_t frames) { (void)data; return frames; }
+/* Audio is summarised, never recorded: the harness only accumulates signal
+ * energy and a peak so a test can assert that the music driver is actually
+ * producing sound (and that different stages differ), without keeping any
+ * audio.  Reset between measurement windows via audio_reset(). */
+static double audioEnergy;
+static unsigned long audioSamples;
+static int audioPeak;
+
+static void audio_reset(void)
+{
+    audioEnergy = 0.0;
+    audioSamples = 0;
+    audioPeak = 0;
+}
+
+static void audio_accumulate(int16_t sample)
+{
+    int magnitude = sample < 0 ? -sample : sample;
+    audioEnergy += (double)sample * (double)sample;
+    audioSamples++;
+    if (magnitude > audioPeak) audioPeak = magnitude;
+}
+
+static void audio_cb(int16_t left, int16_t right)
+{
+    audio_accumulate(left);
+    audio_accumulate(right);
+}
+
+static size_t audio_batch_cb(const int16_t *data, size_t frames)
+{
+    size_t i;
+    for (i = 0; i < frames * 2; i++) audio_accumulate(data[i]);
+    return frames;
+}
 static void input_poll_cb(void) { }
 
 static int16_t input_state_cb(unsigned port, unsigned device, unsigned index, unsigned id)
@@ -120,6 +155,10 @@ static void parse_script(char *script)
     while (token) {
         if (!strncmp(token, "shot@", 5)) {
             if (shotCount < MAX_DIRECTIVES) shots[shotCount++].frame = (unsigned)atoi(token + 5);
+        } else if (!strncmp(token, "audio@", 6)) {
+            /* Report accumulated audio energy at this frame, then reset, so a
+               test can measure one window per stage. */
+            if (audioCount < MAX_DIRECTIVES) audios[audioCount++].frame = (unsigned)atoi(token + 6);
         } else {
             unsigned first, last;
             char name[16];
@@ -250,10 +289,18 @@ int main(int argc, char **argv)
     info.size = (size_t)romSize;
     if (!retro_load_game_fn(&info)) { fprintf(stderr, "retro_load_game failed\n"); return 2; }
 
+    audio_reset();
     for (currentFrame = 0; currentFrame < totalFrames; currentFrame++) {
         retro_run_fn();
         for (i = 0; i < shotCount; i++)
             if (shots[i].frame == currentFrame) dump_ppm(currentFrame);
+        for (i = 0; i < audioCount; i++)
+            if (audios[i].frame == currentFrame) {
+                double rms = audioSamples ? sqrt(audioEnergy / (double)audioSamples) : 0.0;
+                printf("AUDIO %u rms=%.1f peak=%d samples=%lu\n",
+                       currentFrame, rms, audioPeak, audioSamples);
+                audio_reset();
+            }
     }
 
     /* Print the first SRAM bytes for marker assertions. */
