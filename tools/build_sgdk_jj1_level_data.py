@@ -103,7 +103,7 @@ CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
     CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE, \
     CLASS_BRIDGE = range(11)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO, \
-    ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP = range(8)
+    ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP, ITEM_BIRD, ITEM_AIRBOARD = range(10)
 
 
 def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int, int]:
@@ -125,7 +125,14 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     # so the modifier-7 rule below used to swallow them and the whole span
     # vanished - invisible and not walkable.  Classify them first.
     if movement == 28:
-        return CLASS_BRIDGE, 0, 0, 0
+        # JJ1Bridge spans multiA pieces spaced pieceSize*4 px apart, with the
+        # deck multiB px below the cell top.  Drawing only the event's own cell
+        # is why just the first log appeared.  param = piece count,
+        # strength = piece spacing in pixels (both clamped to a byte).
+        pieces = record[22]
+        piece_size = record[24] if record[24] < 128 else record[24] - 256
+        spacing = max(1, piece_size) * 4
+        return CLASS_BRIDGE, min(pieces, 255), min(record[23], 255), min(spacing, 255)
 
     # Destructible scenery is selected by behaviour, not by modifier: the engine
     # counts hits and swaps the block once they reach `strength`.  Modifier 7
@@ -190,6 +197,8 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         26: ITEM_FASTFEET,   # fast feet box
         33: ITEM_SHIELD,     # 1-hit shield
         36: ITEM_SHIELD,     # 4-hit shield
+        34: ITEM_BIRD,       # bird companion
+        35: ITEM_AIRBOARD,   # airboard
         37: ITEM_SCORE,      # diamond
     }.get(modifier)
     if item is not None:

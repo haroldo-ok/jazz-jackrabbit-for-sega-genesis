@@ -40,8 +40,18 @@ typedef int32_t s32;
 
 /* Powerup durations, in frames (the original counts milliseconds; these are
  * the equivalent at 60Hz, capped to fit a byte counter). */
-#define JAZZ_INVINCIBLE_FRAMES 250
-#define JAZZ_FASTFEET_FRAMES   250
+#define JAZZ_INVINCIBLE_FRAMES 600   /* PRT_INVINCIBLE is 10s */
+#define JAZZ_AMMO_PER_CRATE 15       /* addAmmo(type, 15) for a full crate */
+
+/* Player shot types, mapped from the level's bullet definitions (bulletSet):
+ * the default blaster plus four weapons granted by ammo crates. */
+#define JAZZ_SHOT_BLASTER 0   /* straight, slow */
+#define JAZZ_SHOT_TOASTER 1   /* straight, fast */
+#define JAZZ_SHOT_UPWARD  2   /* fast, angled up */
+#define JAZZ_SHOT_BOUNCER 3   /* arcs under gravity, reflects off surfaces */
+#define JAZZ_SHOT_SPECIAL 4   /* fourth weapon crate */
+#define JAZZ_SHOT_TYPES   5
+#define JAZZ_FASTFEET_FRAMES   600
 /* Fast feet raise the run ceiling; high-jump feet raise the jump arc. */
 #define JAZZ_PXS_FASTRUN    1800
 #define JAZZ_HIGHJUMP_BONUS 16
@@ -67,6 +77,7 @@ typedef int32_t s32;
 #define JAZZ_INPUT_FIRE  0x0008
 #define JAZZ_INPUT_START 0x0010
 #define JAZZ_INPUT_SWITCH 0x0020   /* cycle to the next available weapon */
+#define JAZZ_INPUT_DOWN   0x0040   /* crouch, and airboard descent */
 
 #define JAZZ_TILE_EMPTY    0
 #define JAZZ_TILE_SOLID    1
@@ -114,8 +125,16 @@ typedef struct {
     u8 springJump;     /* current ascent came from a spring: ignore button */
     u8 shotType;       /* JAZZ_SHOT_*; blaster by default */
     u8 weaponsOwned;   /* bitmask of collected shot types (blaster always set) */
-    u8 invincibleTime; /* frames of powerup invincibility left (modifier 1) */
-    u8 fastFeetTime;   /* frames of fast feet left (modifier 26) */
+    /* Rounds per weapon.  addAmmo() only switches to a weapon when the player
+     * had none of it, so a count is needed, not just an owned flag. */
+    u8 ammo[JAZZ_SHOT_TYPES];
+    u16 invincibleTime;/* frames of powerup invincibility left (modifier 1);
+                        * the original grants 10s, which overflows a byte */
+    u8 flying;         /* airboard active (modifier 35): thrust up/down, no gravity */
+    u8 bird;           /* bird companion following (modifier 34) */
+    s16 birdX, birdY;  /* companion position, pixels */
+    u8 birdCooldown;   /* frames until the bird may fire again */
+    u16 fastFeetTime;  /* frames of fast feet left (modifier 26) */
     u8 shield;         /* shield hits remaining (modifiers 33/36) */
     u8 highJump;       /* high-jump feet collected (modifier 5) */
     u8 inTube;         /* inside a sucker tube this frame: tube drives motion */
@@ -141,14 +160,6 @@ typedef struct {
     u8 active;
 } JazzBullet;
 
-/* Player shot types, mapped from the level's bullet definitions (bulletSet):
- * the default blaster plus four weapons granted by ammo crates. */
-#define JAZZ_SHOT_BLASTER 0   /* straight, slow */
-#define JAZZ_SHOT_TOASTER 1   /* straight, fast */
-#define JAZZ_SHOT_UPWARD  2   /* fast, angled up */
-#define JAZZ_SHOT_BOUNCER 3   /* arcs under gravity, reflects off surfaces */
-#define JAZZ_SHOT_SPECIAL 4   /* fourth weapon crate */
-#define JAZZ_SHOT_TYPES   5
 
 typedef struct {
     s16 x, y;

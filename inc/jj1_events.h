@@ -51,7 +51,9 @@ enum {
     JJ1_ITEM_AMMO,           /* weapon crate; shot type in the param high nibble */
     JJ1_ITEM_INVINCIBLE,     /* modifier 1: temporary invincibility */
     JJ1_ITEM_SHIELD,         /* modifiers 33/36: absorbs 1 or 4 hits */
-    JJ1_ITEM_HIGHJUMP        /* modifier 5: high-jump feet */
+    JJ1_ITEM_HIGHJUMP,       /* modifier 5: high-jump feet */
+    JJ1_ITEM_BIRD,           /* modifier 34: bird companion */
+    JJ1_ITEM_AIRBOARD        /* modifier 35: airboard flight */
 };
 
 typedef struct {
@@ -66,5 +68,9 @@ typedef struct {
 } Jj1EventInfo;
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id);
+
+/* Test hook: apply a pickup's effect directly (declared here because it needs
+ * the Jj1EventInfo type). */
+void jazz_debug_grant(JazzGame *game, const Jj1EventInfo *info);
 
 #endif

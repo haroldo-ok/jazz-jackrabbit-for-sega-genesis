@@ -797,11 +797,21 @@ static void test_bridges_are_solid(void)
             for (gx = 1; gx < 255; gx++) {
                 if (jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy))->klass
                     != JJ1_CLASS_BRIDGE) continue;
-                /* The deck is solid to a downward probe but not to a sideways
-                   one, so the player lands on it instead of hitting a wall. */
-                CHECK(jj1_runtime_down_point_solid((u8)lvl, (s16)((gx << 5) + 16),
-                                                   (s16)((gy << 5) + 2)),
-                      "a bridge deck is solid from above");
+                {
+                    /* The deck sits `points` px below the cell top and the span
+                       runs `param` pieces of `strength` px, so it must be solid
+                       well to the right of the event's own cell too. */
+                    const Jj1EventInfo *bi =
+                        jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy));
+                    s16 deckY = (s16)((gy << 5) + bi->points);
+                    s16 span = (s16)(bi->param * bi->strength);
+                    CHECK(jj1_runtime_down_point_solid((u8)lvl, (s16)((gx << 5) + 4), deckY),
+                          "a bridge deck is solid from above");
+                    CHECK(span > 32, "a bridge spans more than its own cell");
+                    CHECK(jj1_runtime_down_point_solid((u8)lvl,
+                              (s16)((gx << 5) + span - 8), deckY),
+                          "the far end of the bridge span is solid too");
+                }
                 found = 1;
                 break;
             }
@@ -878,6 +888,80 @@ static void test_powerups(void)
     }
 }
 
+
+/* Progress belongs to the player, not the level.  build_stage() used to wipe
+ * the whole game struct, so finishing a level reset lives and ammo. */
+static void test_progress_survives_level_change(void)
+{
+    JazzGame g;
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.lives = 5;
+    g.score = 1234;
+    g.player.weaponsOwned |= (u8)(1 << JAZZ_SHOT_BOUNCER);
+    g.player.ammo[JAZZ_SHOT_BOUNCER] = 9;
+    g.player.shotType = JAZZ_SHOT_BOUNCER;
+    g.player.shield = 3;
+    g.player.highJump = 1;
+
+    jazz_debug_set_stage(&g, 1);          /* advance a level */
+
+    CHECK(g.lives == 5, "lives survive a level change");
+    CHECK(g.score == 1234, "score survives a level change");
+    CHECK(g.player.ammo[JAZZ_SHOT_BOUNCER] == 9, "ammo survives a level change");
+    CHECK(g.player.weaponsOwned & (1 << JAZZ_SHOT_BOUNCER),
+          "collected weapons survive a level change");
+    CHECK(g.player.shield == 3, "a shield survives a level change");
+    CHECK(g.player.highJump, "high-jump feet survive a level change");
+}
+
+/* addAmmo only selects the weapon when the player had none of it. */
+static void test_ammo_switch_only_when_new(void)
+{
+    JazzGame g;
+    Jj1EventInfo crate;
+    crate.klass = JJ1_CLASS_ITEM;
+    crate.points = 0;
+    crate.strength = 0;
+    crate.param = (u8)(JJ1_ITEM_AMMO | (JAZZ_SHOT_BOUNCER << 4));
+
+    /* First bouncer crate: the player had none, so it becomes current. */
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.player.shotType = JAZZ_SHOT_BLASTER;
+    jazz_debug_grant(&g, &crate);
+    CHECK(g.player.shotType == JAZZ_SHOT_BOUNCER, "a brand new weapon is selected");
+    CHECK(g.player.ammo[JAZZ_SHOT_BOUNCER] > 0, "the crate adds rounds");
+
+    /* Switch away, then top the same weapon up: it must not yank us back. */
+    g.player.shotType = JAZZ_SHOT_BLASTER;
+    jazz_debug_grant(&g, &crate);
+    CHECK(g.player.shotType == JAZZ_SHOT_BLASTER,
+          "topping up a weapon already held does not switch to it");
+}
+
+/* The airboard flies under direct control with gravity suspended. */
+static void test_airboard(void)
+{
+    JazzGame g;
+    int f;
+    s16 y0;
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.player.flying = 1;
+    y0 = g.player.y;
+    for (f = 0; f < 20; f++) jazz_step(&g, JAZZ_INPUT_JUMP);
+    CHECK(g.player.y < y0, "the airboard climbs while thrusting up");
+
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.player.flying = 1;
+    jazz_debug_place(&g, 200, 200);
+    y0 = g.player.y;
+    for (f = 0; f < 20; f++) jazz_step(&g, 0);
+    CHECK(g.player.y <= y0 + 2, "the airboard does not fall under gravity");
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -901,6 +985,9 @@ int main(void)
     test_crates_need_shooting();
     test_bridges_are_solid();
     test_powerups();
+    test_progress_survives_level_change();
+    test_ammo_switch_only_when_new();
+    test_airboard();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return EXIT_FAILURE;
