@@ -100,8 +100,10 @@ def runtime_records(level_path: Path):
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
 CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
-    CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE = range(10)
-ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO = range(5)
+    CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE, \
+    CLASS_BRIDGE = range(11)
+ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO, \
+    ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP = range(8)
 
 
 def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int, int]:
@@ -117,6 +119,13 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     strength = record[9]
     modifier = record[10]
     points = record[11]
+
+    # Bridges are a behaviour, not a modifier: JJ1LevelFrame creates a
+    # JJ1Bridge for movement 28.  They carry modifier 7 ("harmless on touch"),
+    # so the modifier-7 rule below used to swallow them and the whole span
+    # vanished - invisible and not walkable.  Classify them first.
+    if movement == 28:
+        return CLASS_BRIDGE, 0, 0, 0
 
     # Destructible scenery is selected by behaviour, not by modifier: the engine
     # counts hits and swaps the block once they reach `strength`.  Modifier 7
@@ -161,14 +170,17 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         flying = movement in (6, 7, 25)
         return (CLASS_ENEMY_FLY if flying else CLASS_ENEMY_WALK), 0, 0, min(strength, 255)
 
-    # Pickups.  These are the modifiers the original treats as collectable, so
-    # none of them can ever damage the player.
+    # Pickups.  Which effect each modifier grants is taken from takeEvent();
+    # note that touchEvent only *takes* an event in its default case when
+    # strength is 0, so a pickup with strength has to be shot open instead of
+    # walked into.  We carry the record's strength through so the runtime can
+    # make that distinction.
     item = {
-        1: ITEM_SCORE,       # invincibility (not modelled: scores)
+        1: ITEM_INVINCIBLE,  # temporary invincibility
         2: ITEM_HEALTH,      # health
         3: ITEM_HEALTH,      # full health
         4: ITEM_LIFE,        # extra life
-        5: ITEM_FASTFEET,    # high-jump feet
+        5: ITEM_HIGHJUMP,    # high-jump feet
         9: ITEM_SCORE,       # sand timer
         10: ITEM_SCORE,      # checkpoint
         11: ITEM_SCORE,      # generic item
@@ -176,11 +188,12 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         15: ITEM_AMMO, 16: ITEM_AMMO, 17: ITEM_AMMO, 18: ITEM_AMMO,
         19: ITEM_AMMO, 20: ITEM_AMMO, 39: ITEM_AMMO, 40: ITEM_AMMO,
         26: ITEM_FASTFEET,   # fast feet box
-        33: ITEM_SCORE,      # 1-hit shield
-        36: ITEM_SCORE,      # 4-hit shield
+        33: ITEM_SHIELD,     # 1-hit shield
+        36: ITEM_SHIELD,     # 4-hit shield
         37: ITEM_SCORE,      # diamond
     }.get(modifier)
     if item is not None:
+        hits = min(strength, 255)        # 0 = grab on touch, else shoot open
         # Ammo pickups also select a weapon.  OpenJazz's setEvent maps each
         # modifier to addAmmo(weaponType, count), and createBullet fires
         # bulletSet[weaponType + 1]; the resulting behaviours (read from the
@@ -190,9 +203,13 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         if item == ITEM_AMMO:
             weapon = {15: 0, 18: 0, 16: 1, 19: 1, 17: 2, 20: 2, 39: 3, 40: 3,
                       12: 0}.get(modifier, 0)
-            shot = weapon + 1        # 0 is the default blaster
-            return CLASS_ITEM, (ITEM_AMMO | (shot << 4)), min(points * 10 // 25, 255), 0
-        return CLASS_ITEM, item, min(points * 10 // 25, 255), 0
+            shot = weapon + 1            # 0 is the default blaster
+            return CLASS_ITEM, (ITEM_AMMO | (shot << 4)), min(points * 10 // 25, 255), hits
+        # A shield's capacity rides in the param high nibble (1 or 4 hits).
+        if item == ITEM_SHIELD:
+            capacity = 4 if modifier == 36 else 1
+            return CLASS_ITEM, (ITEM_SHIELD | (capacity << 4)), min(points * 10 // 25, 255), hits
+        return CLASS_ITEM, item, min(points * 10 // 25, 255), hits
     if points:
         return CLASS_ITEM, ITEM_SCORE, min(points * 10 // 25, 255), 0
 

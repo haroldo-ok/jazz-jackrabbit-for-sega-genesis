@@ -206,6 +206,10 @@ static void build_stage(JazzGame *g, u8 stage)
     g->player.springJump = 0;
     g->player.shotType = JAZZ_SHOT_BLASTER;
     g->player.weaponsOwned = (u8)(1 << JAZZ_SHOT_BLASTER);
+    g->player.invincibleTime = 0;
+    g->player.fastFeetTime = 0;
+    g->player.shield = 0;
+    g->player.highJump = 0;
     g->player.inTube = 0;
     g->player.facing = 1;
     g->player.onGround = 1;
@@ -274,6 +278,15 @@ static void respawn_or_lose_life(JazzGame *g)
 static void hurt_player(JazzGame *g)
 {
     if (g->invulnerability) return;
+    /* Powerup invincibility ignores damage outright. */
+    if (g->player.invincibleTime) return;
+    /* A shield absorbs one hit per point of capacity before health is lost. */
+    if (g->player.shield) {
+        g->player.shield--;
+        g->invulnerability = 55;
+        g->events |= JAZZ_EVENT_HURT;
+        return;
+    }
     g->events |= JAZZ_EVENT_HURT;
     g->invulnerability = 55;
     if (g->health) g->health--;
@@ -490,6 +503,8 @@ static void hit_destructible(JazzGame *g, u8 gridX, u8 gridY, u8 strength)
 
 /* A bullet that stopped at (x,y): if it struck a destructible block that is
  * still standing, damage it. */
+static void grant_item(JazzGame *g, const Jj1EventInfo *info, u8 gridX, u8 gridY);
+
 static void bullet_hits_scenery(JazzGame *g, s16 x, s16 y)
 {
     s16 gx = x >> 5, gy = y >> 5;
@@ -497,6 +512,12 @@ static void bullet_hits_scenery(JazzGame *g, s16 x, s16 y)
     if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return;
     if (jazz_cell_destroyed(g, (u8)gx, (u8)gy)) return;
     info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
+    /* A pickup with strength is a crate: shooting it open is the only way to
+       take it, and the contents are granted exactly as on a touch pickup. */
+    if ((info->klass == JJ1_CLASS_ITEM) && info->strength) {
+        if (!jazz_event_taken(g, (u8)gx, (u8)gy)) grant_item(g, info, (u8)gx, (u8)gy);
+        return;
+    }
     if (info->klass != JJ1_CLASS_DESTRUCT) return;
     hit_destructible(g, (u8)gx, (u8)gy, info->strength);
 }
@@ -519,6 +540,23 @@ static void update_bullets(JazzGame *g)
         b->x = (s16)(b->x + dx);
         b->y = (s16)(b->y + dy);
 
+#ifdef JAZZ_JJ1_RUNTIME
+        /* Crates are events, not solid tiles, so a shot has to be tested
+           against the event grid too or it flies straight through them. */
+        {
+            s16 cgx = b->x >> 5, cgy = b->y >> 5;
+            if ((cgx >= 0) && (cgx < 256) && (cgy >= 0) && (cgy < 64)) {
+                const Jj1EventInfo *ci =
+                    jj1_event_info(g->stage, jj1_runtime_event(g->stage, cgx, cgy));
+                if ((ci->klass == JJ1_CLASS_ITEM) && ci->strength &&
+                    !jazz_event_taken(g, (u8)cgx, (u8)cgy)) {
+                    grant_item(g, ci, (u8)cgx, (u8)cgy);
+                    b->active = 0;
+                    continue;
+                }
+            }
+        }
+#endif
         if (rect_hits_solid(g, b->x, b->y, 4, 4)) {
             if (b->behaviour == 4) {
                 /* Bouncer: reflect off the surface it struck instead of dying.
@@ -640,6 +678,54 @@ static void scan_grid_enemies(JazzGame *g)
     }
 }
 
+/* Apply a pickup's effect.  Shared by the two ways the original grants one:
+ * walking into a zero-strength event, and shooting a crate open (whose
+ * contents takeEvent hands over once the hits are spent). */
+static void grant_item(JazzGame *g, const Jj1EventInfo *info, u8 gridX, u8 gridY)
+{
+    u8 kind = (u8)(info->param & 0x0F);
+    mark_event_taken(g, gridX, gridY);
+    g->stageGems++;
+    g->score += (u16)info->points * 25;
+    g->events |= JAZZ_EVENT_GEM;
+    switch (kind) {
+    case JJ1_ITEM_HEALTH:
+        if (g->health < 5) g->health++;
+        g->events |= JAZZ_EVENT_HEALTH;
+        break;
+    case JJ1_ITEM_LIFE:
+        if (g->lives < 9) g->lives++;
+        g->events |= JAZZ_EVENT_LIFE;
+        break;
+    case JJ1_ITEM_AMMO: {
+        /* The weapon crate carries the shot type in the high nibble. */
+        u8 shot = (u8)((info->param >> 4) & 0x0F);
+        if (shot < JAZZ_SHOT_TYPES) {
+            g->player.weaponsOwned |= (u8)(1 << shot);
+            g->player.shotType = shot;
+        }
+        break;
+    }
+    case JJ1_ITEM_INVINCIBLE:
+        /* Temporary invincibility, as reaction PR_INVINCIBLE in the original. */
+        g->player.invincibleTime = JAZZ_INVINCIBLE_FRAMES;
+        break;
+    case JJ1_ITEM_SHIELD:
+        /* Capacity (1 or 4 hits) rides in the param high nibble. */
+        g->player.shield = (u8)((info->param >> 4) & 0x0F);
+        break;
+    case JJ1_ITEM_FASTFEET:
+        g->player.fastFeetTime = JAZZ_FASTFEET_FRAMES;
+        break;
+    case JJ1_ITEM_HIGHJUMP:
+        /* High-jump feet raise the jump arc for the rest of the level. */
+        g->player.highJump = 1;
+        break;
+    default:
+        break;
+    }
+}
+
 static void collect_grid_items(JazzGame *g)
 {
     s16 gx0 = g->player.x >> 5;
@@ -654,24 +740,11 @@ static void collect_grid_items(JazzGame *g)
             info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
             if (info->klass != JJ1_CLASS_ITEM) continue;
             if (jazz_event_taken(g, (u8)gx, (u8)gy)) continue;
-            mark_event_taken(g, (u8)gx, (u8)gy);
-            g->stageGems++;
-            g->score += (u16)info->points * 25;
-            g->events |= JAZZ_EVENT_GEM;
-            if ((info->param & 0x0F) == JJ1_ITEM_HEALTH) {
-                if (g->health < 5) g->health++;
-                g->events |= JAZZ_EVENT_HEALTH;
-            } else if ((info->param & 0x0F) == JJ1_ITEM_LIFE) {
-                if (g->lives < 9) g->lives++;
-                g->events |= JAZZ_EVENT_LIFE;
-            } else if ((info->param & 0x0F) == JJ1_ITEM_AMMO) {
-                /* The weapon crate carries the shot type in the high nibble. */
-                u8 shot = (u8)((info->param >> 4) & 0x0F);
-                if (shot < JAZZ_SHOT_TYPES) {
-                    g->player.weaponsOwned |= (u8)(1 << shot);
-                    g->player.shotType = shot;
-                }
-            }
+            /* Only a zero-strength pickup is grabbed by walking into it; one
+               with strength is a crate that has to be shot open first (the
+               original's touchEvent only takes an event when !strength). */
+            if (info->strength) continue;
+            grant_item(g, info, (u8)gx, (u8)gy);
         }
     }
 }
@@ -758,6 +831,13 @@ void jazz_debug_place(JazzGame *g, s16 x, s16 y)
     g->player.springJump = 0;
 }
 
+/* Test hook: apply one point of contact damage, going through the same shield
+ * and invincibility handling the game uses. */
+void jazz_debug_hurt(JazzGame *g)
+{
+    hurt_player(g);
+}
+
 void jazz_debug_set_stage(JazzGame *g, u8 stage)
 {
     build_stage(g, stage);
@@ -802,6 +882,12 @@ u8 jazz_player_anim_state(const JazzGame *g, u16 input)
 /* Horizontal control: two-tier acceleration toward walk speed, then run
  * speed while the direction is held; braking uses the stop deceleration and
  * turning applies the stronger reverse deceleration first. */
+/* Top running speed, raised while fast feet are active (modifier 26). */
+static s16 run_ceiling(const JazzPlayer *p)
+{
+    return p->fastFeetTime ? JAZZ_PXS_FASTRUN : JAZZ_PXS_RUN;
+}
+
 static void accelerate_player(JazzGame *g, u16 input)
 {
     JazzPlayer *p = &g->player;
@@ -809,14 +895,14 @@ static void accelerate_player(JazzGame *g, u16 input)
         p->facing = 1;
         if (p->vx < 0) p->vx += JAZZ_PXA_REVERSE;
         else if (p->vx < JAZZ_PXS_WALK) p->vx += JAZZ_PXA_WALK;
-        else if (p->vx < JAZZ_PXS_RUN) p->vx += JAZZ_PXA_RUN;
-        if (p->vx > JAZZ_PXS_RUN) p->vx = JAZZ_PXS_RUN;
+        else if (p->vx < run_ceiling(p)) p->vx += JAZZ_PXA_RUN;
+        if (p->vx > run_ceiling(p)) p->vx = run_ceiling(p);
     } else if (input & JAZZ_INPUT_LEFT) {
         p->facing = 0;
         if (p->vx > 0) p->vx -= JAZZ_PXA_REVERSE;
         else if (p->vx > -JAZZ_PXS_WALK) p->vx -= JAZZ_PXA_WALK;
-        else if (p->vx > -JAZZ_PXS_RUN) p->vx -= JAZZ_PXA_RUN;
-        if (p->vx < -JAZZ_PXS_RUN) p->vx = -JAZZ_PXS_RUN;
+        else if (p->vx > -run_ceiling(p)) p->vx -= JAZZ_PXA_RUN;
+        if (p->vx < -run_ceiling(p)) p->vx = -run_ceiling(p);
     } else {
         if (p->vx > 0) { if (p->vx < JAZZ_PXA_STOP) p->vx = 0; else p->vx -= JAZZ_PXA_STOP; }
         else if (p->vx < 0) { if (p->vx > -JAZZ_PXA_STOP) p->vx = 0; else p->vx += JAZZ_PXA_STOP; }
@@ -838,6 +924,8 @@ static void integrate_vertical(JazzGame *g, u16 input)
         s16 bonus = p->vx;
         if (bonus < 0) bonus = -bonus;
         p->jumpTargetY = p->y - JAZZ_PYO_JUMP - (bonus >> 5); /* speed bonus, px */
+        /* High-jump feet extend the arc for the rest of the level. */
+        if (p->highJump) p->jumpTargetY -= JAZZ_HIGHJUMP_BONUS;
         p->springJump = 0;
         g->events |= JAZZ_EVENT_JUMP;
     }
@@ -952,6 +1040,9 @@ void jazz_step(JazzGame *g, u16 input)
     }
     if ((pressed & JAZZ_INPUT_FIRE) && !g->fireCooldown) fire_bullet(g);
     if (g->fireCooldown) g->fireCooldown--;
+    /* Timed powerups wind down; the permanent ones (high jump, shield) do not. */
+    if (g->player.invincibleTime) g->player.invincibleTime--;
+    if (g->player.fastFeetTime) g->player.fastFeetTime--;
     if (g->invulnerability) g->invulnerability--;
 
     dx = consume_subpixels(g->player.vx, &g->player.subX);

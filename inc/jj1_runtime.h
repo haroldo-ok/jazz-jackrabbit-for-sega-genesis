@@ -12,6 +12,10 @@
 
 #include "jazz_game.h"
 
+/* Which 4x4 mask row inside a 32x32 cell the bridge deck occupies (0-7). The
+ * span is drawn near the top of its cell, so only the first row is standable. */
+#define JJ1_BRIDGE_DECK_CELL 1
+
 /* The shareware ships eight levels across three worlds. */
 extern const u8 jj1_level0_blocks[256 * 64];
 extern const u8 jj1_level0_events[256 * 64];

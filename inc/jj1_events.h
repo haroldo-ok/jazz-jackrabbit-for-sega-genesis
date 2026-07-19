@@ -38,7 +38,8 @@ enum {
     JJ1_CLASS_ONEWAY,        /* modifier 6: land-from-above platform */
     JJ1_CLASS_END,           /* modifier 27: end-of-level sign */
     JJ1_CLASS_DESTRUCT,      /* behaviour 21: destructible block/sign */
-    JJ1_CLASS_TUBE           /* movement 37/38: sucker tube, horizontal push */
+    JJ1_CLASS_TUBE,          /* movement 37/38: sucker tube, horizontal push */
+    JJ1_CLASS_BRIDGE         /* movement 28: walkable bridge span */
 };
 
 /* Item modifiers mirroring the original meanings that matter here. */
@@ -46,15 +47,22 @@ enum {
     JJ1_ITEM_SCORE = 0,      /* gems, food: points only */
     JJ1_ITEM_HEALTH,         /* carrot: +1 energy */
     JJ1_ITEM_LIFE,           /* extra life */
-    JJ1_ITEM_FASTFEET,       /* speed shoes (scored; effect TODO) */
-    JJ1_ITEM_AMMO            /* weapon pickup (scored; weapon TODO) */
+    JJ1_ITEM_FASTFEET,       /* modifier 26: fast feet, higher run speed */
+    JJ1_ITEM_AMMO,           /* weapon crate; shot type in the param high nibble */
+    JJ1_ITEM_INVINCIBLE,     /* modifier 1: temporary invincibility */
+    JJ1_ITEM_SHIELD,         /* modifiers 33/36: absorbs 1 or 4 hits */
+    JJ1_ITEM_HIGHJUMP        /* modifier 5: high-jump feet */
 };
 
 typedef struct {
     u8 klass;                /* JJ1_CLASS_* */
-    u8 param;                /* item modifier, or spring launch magnitude */
+    u8 param;                /* item kind, or spring/tube magnitude */
     u8 points;               /* score / 25 to fit a byte (gem = 4 -> 100) */
-    u8 strength;             /* enemy hit points, or destructible shots to break */
+    /* Hit points.  For an item this is the crucial touch-vs-shoot flag: the
+     * original only grabs a pickup on contact when strength is 0
+     * (JJ1LevelPlayer::touchEvent's default case), otherwise the crate has to
+     * be shot open and takeEvent grants the contents. */
+    u8 strength;
 } Jj1EventInfo;
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id);
