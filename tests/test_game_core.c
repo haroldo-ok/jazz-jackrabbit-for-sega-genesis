@@ -742,6 +742,142 @@ static void test_weapon_switch(void)
     }
 }
 
+
+/* The original only grabs a pickup by walking into it when its strength is 0
+ * (touchEvent's default case); a crate with strength must be shot open, and
+ * takeEvent then hands over the contents.  Every item used to be grabbable. */
+static void test_crates_need_shooting(void)
+{
+    int lvl, found_crate = 0, found_touch = 0;
+
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT && !(found_crate && found_touch); lvl++) {
+        int gx, gy;
+        for (gy = 1; gy < 63; gy++)
+            for (gx = 1; gx < 255; gx++) {
+                const Jj1EventInfo *info =
+                    jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy));
+                JazzGame g;
+                if (info->klass != JJ1_CLASS_ITEM) continue;
+
+                if (info->strength && !found_crate) {
+                    /* Standing in a crate must not collect it. */
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 6));
+                    jazz_step(&g, 0);
+                    CHECK(!jazz_event_taken(&g, (u8)gx, (u8)gy),
+                          "a crate is not collected by touching it");
+                    found_crate = 1;
+                } else if (!info->strength && !found_touch) {
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 6));
+                    jazz_step(&g, 0);
+                    CHECK(jazz_event_taken(&g, (u8)gx, (u8)gy),
+                          "a zero-strength pickup is still grabbed on touch");
+                    found_touch = 1;
+                }
+                if (found_crate && found_touch) goto done;
+            }
+    }
+done:
+    CHECK(found_crate, "the levels contain shoot-open crates");
+    CHECK(found_touch, "the levels contain touch pickups");
+}
+
+/* Bridges (movement 28) carry modifier 7, which the classifier used to treat
+ * as harmless scenery - so the Diamondus spans were dropped entirely: not
+ * drawn, and not solid.  They must exist and be standable from above. */
+static void test_bridges_are_solid(void)
+{
+    int lvl, found = 0;
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT && !found; lvl++) {
+        int gx, gy;
+        for (gy = 1; gy < 63 && !found; gy++)
+            for (gx = 1; gx < 255; gx++) {
+                if (jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy))->klass
+                    != JJ1_CLASS_BRIDGE) continue;
+                /* The deck is solid to a downward probe but not to a sideways
+                   one, so the player lands on it instead of hitting a wall. */
+                CHECK(jj1_runtime_down_point_solid((u8)lvl, (s16)((gx << 5) + 16),
+                                                   (s16)((gy << 5) + 2)),
+                      "a bridge deck is solid from above");
+                found = 1;
+                break;
+            }
+    }
+    CHECK(found, "the levels contain bridges");
+}
+
+/* Invincibility, shields, fast feet and high-jump feet all had no effect. */
+static void test_powerups(void)
+{
+    JazzGame g;
+    u8 healthBefore;
+
+    /* Invincibility ignores damage entirely. */
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.player.invincibleTime = 60;
+    g.invulnerability = 0;
+    healthBefore = g.health;
+    jazz_debug_hurt(&g);
+    CHECK(g.health == healthBefore, "invincibility ignores damage");
+
+    /* A shield absorbs hits before health is touched. */
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    g.player.shield = 2;
+    g.invulnerability = 0;
+    healthBefore = g.health;
+    jazz_debug_hurt(&g);
+    CHECK(g.health == healthBefore, "a shield absorbs the hit");
+    CHECK(g.player.shield == 1, "the shield loses a point per hit");
+
+    /* Once spent, damage lands again. */
+    g.player.shield = 0;
+    g.invulnerability = 0;
+    jazz_debug_hurt(&g);
+    CHECK(g.health < healthBefore, "damage lands once the shield is gone");
+
+    /* Fast feet raise the top running speed. */
+    {
+        JazzGame slow, fast;
+        int f;
+        jazz_game_init(&slow);
+        jazz_debug_set_stage(&slow, 0);
+        jazz_game_init(&fast);
+        jazz_debug_set_stage(&fast, 0);
+        fast.player.fastFeetTime = 200;
+        for (f = 0; f < 60; f++) {
+            jazz_step(&slow, JAZZ_INPUT_RIGHT);
+            jazz_step(&fast, JAZZ_INPUT_RIGHT);
+        }
+        CHECK(fast.player.vx > slow.player.vx, "fast feet run faster than normal");
+    }
+
+    /* High-jump feet reach higher than a normal jump. */
+    {
+        JazzGame low, high;
+        int f;
+        s16 lowTop, highTop;
+        jazz_game_init(&low);
+        jazz_debug_set_stage(&low, 0);
+        jazz_game_init(&high);
+        jazz_debug_set_stage(&high, 0);
+        high.player.highJump = 1;
+        lowTop = low.player.y;
+        highTop = high.player.y;
+        for (f = 0; f < 40; f++) {
+            jazz_step(&low, JAZZ_INPUT_JUMP);
+            jazz_step(&high, JAZZ_INPUT_JUMP);
+            if (low.player.y < lowTop) lowTop = low.player.y;
+            if (high.player.y < highTop) highTop = high.player.y;
+        }
+        CHECK(highTop < lowTop, "high-jump feet jump higher");
+    }
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -762,6 +898,9 @@ int main(void)
     test_sucker_tubes();
     test_shot_types();
     test_weapon_switch();
+    test_crates_need_shooting();
+    test_bridges_are_solid();
+    test_powerups();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return EXIT_FAILURE;

@@ -404,8 +404,12 @@ static void render_jj1_events(u16 *count)
                 put_sprite(count, (sx << 5) - cameraX, (sy << 5) - cameraY + 16,
                     SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
                     T_SPRING + (variant * JJ1_SPRING_TILES_PER_VARIANT)));
-            } else if ((info->klass == JJ1_CLASS_ITEM) &&
-                       !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
+            } else if (((info->klass == JJ1_CLASS_ITEM) &&
+                        !jazz_event_taken(&game, (u8)sx, (u8)sy)) ||
+                       (info->klass == JJ1_CLASS_BRIDGE)) {
+                /* Bridges are drawn by their event, not by the tile map: the
+                   block behind a span is empty, so without this the whole
+                   bridge is invisible (and, before the runtime fix, a hole). */
                 const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
                 if (art && art->frames &&
                     (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {

@@ -38,6 +38,14 @@ typedef int32_t s32;
 #define JAZZ_MAX_BULLETS 6   /* room for the missile's up+down pair per shot */
 #define JAZZ_STAGE_COUNT 8   /* all eight shareware levels */
 
+/* Powerup durations, in frames (the original counts milliseconds; these are
+ * the equivalent at 60Hz, capped to fit a byte counter). */
+#define JAZZ_INVINCIBLE_FRAMES 250
+#define JAZZ_FASTFEET_FRAMES   250
+/* Fast feet raise the run ceiling; high-jump feet raise the jump arc. */
+#define JAZZ_PXS_FASTRUN    1800
+#define JAZZ_HIGHJUMP_BONUS 16
+
 /* Player animation states, mapped from the original PA_ indices.  Kept here
  * (not in jazz_gfx.h) so the game core can derive the state from physics. */
 #define JJ1_PLAYER_STAND  0
@@ -106,6 +114,10 @@ typedef struct {
     u8 springJump;     /* current ascent came from a spring: ignore button */
     u8 shotType;       /* JAZZ_SHOT_*; blaster by default */
     u8 weaponsOwned;   /* bitmask of collected shot types (blaster always set) */
+    u8 invincibleTime; /* frames of powerup invincibility left (modifier 1) */
+    u8 fastFeetTime;   /* frames of fast feet left (modifier 26) */
+    u8 shield;         /* shield hits remaining (modifiers 33/36) */
+    u8 highJump;       /* high-jump feet collected (modifier 5) */
     u8 inTube;         /* inside a sucker tube this frame: tube drives motion */
 } JazzPlayer;
 
@@ -198,6 +210,7 @@ u8 jazz_cell_destroyed(const JazzGame *game, u8 gridX, u8 gridY);
 void jazz_debug_place(JazzGame *game, s16 x, s16 y);
 /* Rebuild the game on a given stage (tests only). */
 void jazz_debug_set_stage(JazzGame *game, u8 stage);
+void jazz_debug_hurt(JazzGame *game);
 /* Y coordinate of the player's feet, i.e. the bottom of the collision body. */
 s16 jazz_player_feet(const JazzGame *game);
 /* Current player animation state (JJ1_PLAYER_* in jazz_gfx.h), derived from

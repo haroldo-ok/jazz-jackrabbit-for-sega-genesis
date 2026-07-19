@@ -76,11 +76,19 @@ static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
     u8 block;
     if ((cellX < 0) || (cellX >= (256 * 8)) || (cellY < 0) || (cellY >= (64 * 8))) return 1;
     d = jj1_level_data(stage);
-    /* One-way platforms (JJ1 modifier 6, grid event 122): only downward
-       feet probes may land. */
-    if (!allowOneWay &&
-        (jj1_event_info(stage, d.events[(((u16)cellY >> 3) << 8) + (cellX >> 3)])->klass
-         == JJ1_CLASS_ONEWAY)) return 0;
+    {
+        u8 event = d.events[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
+        u8 klass = jj1_event_info(stage, event)->klass;
+        /* One-way platforms (JJ1 modifier 6, grid event 122): only downward
+           feet probes may land. */
+        if (!allowOneWay && (klass == JJ1_CLASS_ONEWAY)) return 0;
+        /* A bridge (movement 28) is drawn by the event, not the tile, so the
+           block behind it is usually empty.  Its deck sits near the top of the
+           cell and, like a one-way platform, is only solid from above - that is
+           what makes the Diamondus spans walkable instead of a hole. */
+        if (klass == JJ1_CLASS_BRIDGE)
+            return (allowOneWay && ((cellY & 7) <= JJ1_BRIDGE_DECK_CELL)) ? 1 : 0;
+    }
     block = d.blocks[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
     if (block >= 240) return 0;
     return (d.masks[((u16)block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? 1 : 0;
