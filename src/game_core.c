@@ -951,6 +951,7 @@ u8 jazz_player_anim_state(const JazzGame *g, u16 input)
     const JazzPlayer *p = &g->player;
     s16 speed = (p->vx < 0) ? -p->vx : p->vx;
 
+    if (p->flying) return JJ1_PLAYER_BOARD;
     if (g->invulnerability && !p->onGround) return JJ1_PLAYER_HURT;
     if (p->springJump) return JJ1_PLAYER_SPRING;
 
@@ -1018,7 +1019,7 @@ static void integrate_vertical(JazzGame *g, u16 input)
        branch (jump accelerates upward, crouch downward, both capped at run
        speed).  Jump doubles as "up" so the board works on a 3-button pad. */
     if (p->flying) {
-        if (input & JAZZ_INPUT_JUMP) {
+        if (input & (JAZZ_INPUT_UP | JAZZ_INPUT_JUMP)) {
             if (p->vy > 0) p->vy -= JAZZ_PXA_REVERSE;
             else if (p->vy > -JAZZ_PXS_WALK) p->vy -= JAZZ_PXA_WALK;
             else if (p->vy > -JAZZ_PXS_RUN) p->vy -= JAZZ_PXA_RUN;
