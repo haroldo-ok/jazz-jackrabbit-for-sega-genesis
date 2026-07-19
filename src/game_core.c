@@ -187,6 +187,20 @@ static void spawn_enemy(JazzGame *g, u8 slot, u8 tx, u8 left, u8 right)
 
 static void build_stage(JazzGame *g, u8 stage)
 {
+    /* Progress belongs to the player, not the level: the original reloads the
+       level around a Player that survives, so lives, score, weapons and
+       powerups carry over.  clear_game() wipes the whole struct, which is why
+       finishing a level used to reset ammo and lives. */
+    u8 carryLives = g->lives;
+    u32 carryScore = g->score;
+    u8 carryShot = g->player.shotType;
+    u8 carryOwned = g->player.weaponsOwned;
+    u8 carryShield = g->player.shield;
+    u8 carryHighJump = g->player.highJump;
+    u8 carryAmmo[JAZZ_SHOT_TYPES];
+    u8 ai;
+    for (ai = 0; ai < JAZZ_SHOT_TYPES; ai++) carryAmmo[ai] = g->player.ammo[ai];
+
     clear_game(g);
     g->stage = stage;
     g->health = 5;
@@ -204,12 +218,17 @@ static void build_stage(JazzGame *g, u8 stage)
     g->player.vy = 0;
     g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET;
     g->player.springJump = 0;
-    g->player.shotType = JAZZ_SHOT_BLASTER;
-    g->player.weaponsOwned = (u8)(1 << JAZZ_SHOT_BLASTER);
+    g->lives = carryLives;
+    g->score = carryScore;
+    g->player.shotType = carryShot;
+    g->player.weaponsOwned = (u8)(carryOwned | (1 << JAZZ_SHOT_BLASTER));
+    for (ai = 0; ai < JAZZ_SHOT_TYPES; ai++) g->player.ammo[ai] = carryAmmo[ai];
+    g->player.shield = carryShield;
+    g->player.highJump = carryHighJump;
+    /* Timed effects and the airboard do not survive the level. */
     g->player.invincibleTime = 0;
     g->player.fastFeetTime = 0;
-    g->player.shield = 0;
-    g->player.highJump = 0;
+    g->player.flying = 0;
     g->player.inTube = 0;
     g->player.facing = 1;
     g->player.onGround = 1;
@@ -523,6 +542,61 @@ static void bullet_hits_scenery(JazzGame *g, s16 x, s16 y)
 }
 #endif
 
+/* The bird companion trails the player and fires at enemies near it, as
+ * JJ1Bird::step does: it closes on the leader, hovers slightly above, and
+ * shoots when an enemy is within range on the side the player faces. */
+static void update_bird(JazzGame *g)
+{
+    JazzPlayer *p = &g->player;
+    s16 targetX, targetY;
+    u8 e;
+    if (!p->bird) return;
+
+    targetX = (s16)(p->facing ? (p->x - 20) : (p->x + 20));
+    targetY = (s16)(p->y - 20);
+    /* Ease toward the trailing position rather than snapping to it. */
+    p->birdX = (s16)(p->birdX + ((targetX - p->birdX) >> 3));
+    p->birdY = (s16)(p->birdY + ((targetY - p->birdY) >> 3));
+
+    if (p->birdCooldown) { p->birdCooldown--; return; }
+    for (e = 0; e < JAZZ_MAX_ENEMIES; e++) {
+        JazzEnemy *en = &g->enemies[e];
+        s16 dx;
+        if (!en->active) continue;
+        if ((en->klass != JJ1_CLASS_ENEMY_WALK) && (en->klass != JJ1_CLASS_ENEMY_FLY)) continue;
+        dx = (s16)(en->x - p->birdX);
+        if (p->facing ? (dx < 0) : (dx > 0)) continue;   /* only ahead of the player */
+        if (dx < 0) dx = (s16)-dx;
+        if (dx > 160) continue;
+        {
+            s16 dy = (s16)(en->y - p->birdY);
+            if (dy < 0) dy = (s16)-dy;
+            if (dy > 48) continue;
+        }
+        /* Fire a blaster bolt from the bird. */
+        {
+            u8 i;
+            for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
+                JazzBullet *b = &g->bullets[i];
+                if (b->active) continue;
+                b->active = 1;
+                b->x = p->birdX;
+                b->y = p->birdY;
+                b->vx = (s16)(p->facing ? 1000 : -1000);
+                b->vy = 0;
+                b->subX = 0;
+                b->subY = 0;
+                b->gravity = 0;
+                b->behaviour = 0;
+                p->birdCooldown = 30;
+                g->events |= JAZZ_EVENT_FIRE;
+                break;
+            }
+        }
+        break;
+    }
+}
+
 static void update_bullets(JazzGame *g)
 {
     u8 i, e;
@@ -698,17 +772,32 @@ static void grant_item(JazzGame *g, const Jj1EventInfo *info, u8 gridX, u8 gridY
         g->events |= JAZZ_EVENT_LIFE;
         break;
     case JJ1_ITEM_AMMO: {
-        /* The weapon crate carries the shot type in the high nibble. */
+        /* The weapon crate carries the shot type in the high nibble.  As in
+           Player::addAmmo, the weapon is only auto-selected when the player had
+           none of it: topping up a weapon you already carry must not yank you
+           off the one you are using. */
         u8 shot = (u8)((info->param >> 4) & 0x0F);
-        if (shot < JAZZ_SHOT_TYPES) {
+        if (shot && (shot < JAZZ_SHOT_TYPES)) {
+            u16 total;
+            if (!g->player.ammo[shot]) g->player.shotType = shot;
             g->player.weaponsOwned |= (u8)(1 << shot);
-            g->player.shotType = shot;
+            total = (u16)(g->player.ammo[shot] + JAZZ_AMMO_PER_CRATE);
+            g->player.ammo[shot] = (u8)((total > 255) ? 255 : total);
         }
         break;
     }
     case JJ1_ITEM_INVINCIBLE:
         /* Temporary invincibility, as reaction PR_INVINCIBLE in the original. */
         g->player.invincibleTime = JAZZ_INVINCIBLE_FRAMES;
+        break;
+    case JJ1_ITEM_AIRBOARD:
+        /* The airboard flies until the level ends or a modifier-38 event. */
+        g->player.flying = 1;
+        break;
+    case JJ1_ITEM_BIRD:
+        g->player.bird = 1;
+        g->player.birdX = g->player.x;
+        g->player.birdY = (s16)(g->player.y - 24);
         break;
     case JJ1_ITEM_SHIELD:
         /* Capacity (1 or 4 hits) rides in the param high nibble. */
@@ -833,6 +922,12 @@ void jazz_debug_place(JazzGame *g, s16 x, s16 y)
 
 /* Test hook: apply one point of contact damage, going through the same shield
  * and invincibility handling the game uses. */
+/* Test hook: apply a pickup's effect directly. */
+void jazz_debug_grant(JazzGame *g, const Jj1EventInfo *info)
+{
+    grant_item(g, info, 0, 0);
+}
+
 void jazz_debug_hurt(JazzGame *g)
 {
     hurt_player(g);
@@ -917,6 +1012,30 @@ static void accelerate_player(JazzGame *g, u16 input)
 static void integrate_vertical(JazzGame *g, u16 input)
 {
     JazzPlayer *p = &g->player;
+
+    /* Airboard: while flying the player thrusts up or down under direct
+       control and gravity is suspended entirely, as in the original's flying
+       branch (jump accelerates upward, crouch downward, both capped at run
+       speed).  Jump doubles as "up" so the board works on a 3-button pad. */
+    if (p->flying) {
+        if (input & JAZZ_INPUT_JUMP) {
+            if (p->vy > 0) p->vy -= JAZZ_PXA_REVERSE;
+            else if (p->vy > -JAZZ_PXS_WALK) p->vy -= JAZZ_PXA_WALK;
+            else if (p->vy > -JAZZ_PXS_RUN) p->vy -= JAZZ_PXA_RUN;
+        } else if (input & JAZZ_INPUT_DOWN) {
+            if (p->vy < 0) p->vy += JAZZ_PXA_REVERSE;
+            else if (p->vy < JAZZ_PXS_WALK) p->vy += JAZZ_PXA_WALK;
+            else if (p->vy < JAZZ_PXS_RUN) p->vy += JAZZ_PXA_RUN;
+        } else {
+            /* Coast back to level flight. */
+            if (p->vy > JAZZ_PXA_WALK) p->vy -= JAZZ_PXA_WALK;
+            else if (p->vy < -JAZZ_PXA_WALK) p->vy += JAZZ_PXA_WALK;
+            else p->vy = 0;
+        }
+        p->jumpTargetY = JAZZ_NO_JUMP_TARGET;
+        p->springJump = 0;
+        return;
+    }
 
     if ((input & JAZZ_INPUT_JUMP) && p->onGround &&
         (p->jumpTargetY == JAZZ_NO_JUMP_TARGET) &&
@@ -1074,6 +1193,7 @@ void jazz_step(JazzGame *g, u16 input)
     scan_grid_enemies(g);
 #endif
 
+    update_bird(g);
     update_bullets(g);
     update_enemies(g);
     collect_gems(g);

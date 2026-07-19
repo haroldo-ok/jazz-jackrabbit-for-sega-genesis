@@ -41,6 +41,7 @@ static u16 input_from_pad(u16 pad)
     if (pad & BUTTON_B) input |= JAZZ_INPUT_JUMP;
     if (pad & BUTTON_A) input |= JAZZ_INPUT_FIRE;
     if (pad & BUTTON_C) input |= JAZZ_INPUT_SWITCH;   /* cycle weapons */
+    if (pad & BUTTON_DOWN) input |= JAZZ_INPUT_DOWN;  /* crouch / airboard down */
     if (pad & BUTTON_START) input |= JAZZ_INPUT_START;
     return input;
 }
@@ -404,12 +405,45 @@ static void render_jj1_events(u16 *count)
                 put_sprite(count, (sx << 5) - cameraX, (sy << 5) - cameraY + 16,
                     SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
                     T_SPRING + (variant * JJ1_SPRING_TILES_PER_VARIANT)));
-            } else if (((info->klass == JJ1_CLASS_ITEM) &&
-                        !jazz_event_taken(&game, (u8)sx, (u8)sy)) ||
-                       (info->klass == JJ1_CLASS_BRIDGE)) {
-                /* Bridges are drawn by their event, not by the tile map: the
-                   block behind a span is empty, so without this the whole
-                   bridge is invisible (and, before the runtime fix, a hole). */
+            } else if (info->klass == JJ1_CLASS_BRIDGE) {
+                /* One bridge event is a whole span: `param` logs spaced
+                   `strength` px apart, with the deck `points` px below the cell
+                   top.  Drawing only the event's own cell showed just the first
+                   log.  The span is drawn from its own cell so it is emitted
+                   once, not once per column it crosses. */
+                const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
+                if (art && art->frames &&
+                    (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {
+                    u8 slot = 0xFF, k;
+                    for (k = 0; k < JJ1_ITEM_SLOTS; k++)
+                        if (itemSlotEvent[k] == id) { slot = k; break; }
+                    if (slot == 0xFF)
+                        for (k = 0; k < JJ1_ITEM_SLOTS; k++)
+                            if (itemSlotEvent[k] == 0xFF) {
+                                slot = k;
+                                itemSlotEvent[k] = id;
+                                VDP_loadTileData(stageArt->spriteTiles +
+                                    ((u32)art->tile * 8),
+                                    T_ITEM_BASE + (k * JJ1_ITEM_SLOT_TILES),
+                                    (u16)(art->tilesW * art->tilesH), DMA);
+                                break;
+                            }
+                    if (slot != 0xFF) {
+                        s16 deckY = (s16)((sy << 5) + info->points) - cameraY;
+                        s16 baseX = (s16)(sx << 5) - cameraX;
+                        u8 piece;
+                        for (piece = 0; piece < info->param; piece++) {
+                            s16 lx = (s16)(baseX + (piece * info->strength));
+                            if ((lx < -32) || (lx > 320)) continue;  /* off screen */
+                            put_sprite(count, lx, deckY,
+                                SPRITE_SIZE(art->tilesW, art->tilesH),
+                                TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
+                                    T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES)));
+                        }
+                    }
+                }
+            } else if ((info->klass == JJ1_CLASS_ITEM) &&
+                       !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
                 const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
                 if (art && art->frames &&
                     (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {
@@ -477,6 +511,25 @@ static void render_sprites(void)
                              ((u32)(art->tile + (frame * art->tilesW * art->tilesH)) * 8),
                              T_PLAYER, art->tilesW * art->tilesH, DMA);
             playerSlotFrame = wanted;
+        }
+        /* Invincibility sparks: four sparkles orbiting the player, as the
+           original draws with fSin/fCos at radius 12.  A small quarter-circle
+           table avoids trig on the 68000. */
+        if (game.player.invincibleTime) {
+            static const s8 orbit[8][2] = {
+                { 12, 0 }, { 8, 8 }, { 0, 12 }, { -8, 8 },
+                { -12, 0 }, { -8, -8 }, { 0, -12 }, { 8, -8 }
+            };
+            u8 phase = (u8)((game.frame >> 1) & 7);
+            u8 k;
+            for (k = 0; k < 4; k++) {
+                const s8 *o = orbit[(phase + (k << 1)) & 7];
+                put_sprite(&count,
+                           game.player.x - cameraX + (PLAYER_W >> 1) - 4 + o[0],
+                           game.player.y - cameraY + (PLAYER_H >> 1) - 4 + o[1],
+                           SPRITE_SIZE(1, 1),
+                           TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
+            }
         }
         if (!(game.invulnerability && (game.frame & 4))) {
             u16 tile = T_PLAYER;

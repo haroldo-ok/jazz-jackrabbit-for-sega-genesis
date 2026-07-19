@@ -70,6 +70,34 @@ u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY)
 
 /* JJ1 masks are 8x8 cells per 32x32 block: one bit is a 4x4-pixel collision
  * cell, accurate enough for slopes/ramp stepping on a 7.67 MHz 68000. */
+/* Is this 4x4 mask cell on a bridge deck?  One bridge event spans `param`
+ * pieces spaced `strength` pixels apart, with the deck `points` pixels below
+ * the cell's top edge, so a span reaches several blocks to the right of the
+ * event that owns it. */
+static u8 bridge_deck(u8 stage, s16 cellX, s16 cellY)
+{
+    Jj1LevelData d = jj1_level_data(stage);
+    s16 blockY = (s16)((u16)cellY >> 3);
+    s16 blockX = (s16)(cellX >> 3);
+    s16 px = (s16)(cellX << 2);            /* left edge of this mask cell */
+    s16 py = (s16)(cellY << 2);
+    s16 scan;
+    if ((blockY < 0) || (blockY > 63)) return 0;
+    /* A span is at most 255 px, so eight blocks back always covers it. */
+    for (scan = blockX; (scan >= 0) && (scan > blockX - 9); scan--) {
+        const Jj1EventInfo *info =
+            jj1_event_info(stage, d.events[(((u16)blockY) << 8) + scan]);
+        s16 startX, deckY, span;
+        if (info->klass != JJ1_CLASS_BRIDGE) continue;
+        startX = (s16)(scan << 5);
+        span = (s16)((s16)info->param * (s16)info->strength);
+        deckY = (s16)((blockY << 5) + info->points);
+        if ((px >= startX) && (px < startX + span) &&
+            (py + 4 > deckY) && (py < deckY + 8)) return 1;
+    }
+    return 0;
+}
+
 static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
 {
     Jj1LevelData d;
@@ -83,12 +111,13 @@ static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
            feet probes may land. */
         if (!allowOneWay && (klass == JJ1_CLASS_ONEWAY)) return 0;
         /* A bridge (movement 28) is drawn by the event, not the tile, so the
-           block behind it is usually empty.  Its deck sits near the top of the
-           cell and, like a one-way platform, is only solid from above - that is
-           what makes the Diamondus spans walkable instead of a hole. */
-        if (klass == JJ1_CLASS_BRIDGE)
-            return (allowOneWay && ((cellY & 7) <= JJ1_BRIDGE_DECK_CELL)) ? 1 : 0;
+           block behind it is usually empty.  One event spans multiA pieces of
+           pieceSize*4 px, so the deck extends well past its own cell: scan back
+           along the row for a bridge whose span reaches this column.  Like a
+           one-way platform it is only solid from above. */
+        if (klass == JJ1_CLASS_BRIDGE) return allowOneWay ? bridge_deck(stage, cellX, cellY) : 0;
     }
+    if (allowOneWay && bridge_deck(stage, cellX, cellY)) return 1;
     block = d.blocks[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
     if (block >= 240) return 0;
     return (d.masks[((u16)block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? 1 : 0;
