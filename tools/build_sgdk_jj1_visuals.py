@@ -196,7 +196,7 @@ def main() -> None:
     # SPRITES.<world> yields a mostly-empty bank.
     sprites = decode_mainchar(args.input / "MAINCHAR.000", sprite_file)
     bank = sprites
-    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims = runtime_records(args.input / args.level)
+    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims, level_anims = runtime_records(args.input / args.level)
     anims = decode_anims(anim_bytes)
     # The first eight MAINCHAR records are consecutive original Jazz walk
     # frames in the Episode 1 shareware data. Keep all of them resident so the
@@ -207,9 +207,10 @@ def main() -> None:
     # to the original PA_ indices (right-facing; the ROM flips for left).
     PA_RWALK, PA_RJUMP, PA_RSHOOT, PA_RCROUCH, PA_RFALL = 1, 3, 7, 9, 11
     PA_RSTAND, PA_LOOKUP, PA_RRUN, PA_RSTOP, PA_RHURT, PA_RSPRING = 19, 24, 29, 35, 13, 36
+    PA_RBOARD = 17
     player_state_anims = [
         PA_RSTAND, PA_RWALK, PA_RRUN, PA_RJUMP, PA_RFALL, PA_RSHOOT,
-        PA_RCROUCH, PA_LOOKUP, PA_RSTOP, PA_RHURT, PA_RSPRING,
+        PA_RCROUCH, PA_LOOKUP, PA_RSTOP, PA_RHURT, PA_RSPRING, PA_RBOARD,
     ]
 
     def frames_for_player_anim(pa_index: int) -> list:
@@ -225,6 +226,29 @@ def main() -> None:
         return out
 
     player_state_frames = [frames_for_player_anim(pa) for pa in player_state_anims]
+
+    # Level animations (JJ1LANIMS) hold art that is not tied to any event: the
+    # bird companion, the airboard and the shields.  LA_RBIRD/LA_LBIRD are 7/6
+    # and LA_1SHIELD/LA_4SHIELD are 10/3.
+    LA_4SHIELD, LA_LBIRD, LA_RBIRD, LA_1SHIELD = 3, 6, 7, 10
+
+    def frames_for_level_anim(index):
+        anim_id = level_anims[index] if index < len(level_anims) else 0
+        out = []
+        if anim_id and anim_id < len(anims):
+            for frame in anims[anim_id]["frames"][:MAX_FRAMES]:
+                sprite = bank[frame["sprite"]] if frame["sprite"] < len(bank) else None
+                if sprite is not None:
+                    out.append(sprite)
+        return out
+
+    bird_frames = frames_for_level_anim(LA_RBIRD) or frames_for_level_anim(LA_LBIRD)
+    bird_left_frames = frames_for_level_anim(LA_LBIRD)
+    shield_frames = frames_for_level_anim(LA_1SHIELD) or frames_for_level_anim(LA_4SHIELD)
+    blank = (8, 8, bytes([SKEY]) * 64)
+    if not bird_frames: bird_frames = [blank]
+    if not bird_left_frames: bird_left_frames = bird_frames
+    if not shield_frames: shield_frames = [blank]
 
     # Resolve every event that appears in this level through its animation,
     # rather than guessing sprite numbers.  JJ1 keeps separate art for each
@@ -381,6 +405,17 @@ def main() -> None:
                 enemy_words.extend(encode_sprite_tiles(quantize_pixels(image, palette, mask), cw, ch))
         descriptors[event_id] = (base, len(images), cw // 8, ch // 8, left_base)
 
+    # Bird (both facings) and shield share the event sprite bank.
+    extra = []
+    for label, frames in (("bird", bird_frames), ("bird_left", bird_left_frames),
+                          ("shield", shield_frames)):
+        cw, ch = cell_size(frames)
+        base = len(enemy_words) // 8
+        for sprite in frames:
+            image, mask = sprite_to_image(sprite, source_palette, cw, ch)
+            enemy_words.extend(encode_sprite_tiles(quantize_pixels(image, palette, mask), cw, ch))
+        extra.append((label, base, len(frames), cw // 8, ch // 8))
+
     per_frame = {e: (d[2] * d[3]) for e, d in descriptors.items()}
     biggest = max(per_frame.values())
     if biggest > JJ1_ENEMY_SLOT_TILES:
@@ -444,6 +479,12 @@ def main() -> None:
     for event_id, (base, frames, tw, th, left_base) in sorted(descriptors.items()):
         output.append(f"    [{event_id}] = {{ {base}, {frames}, {tw}, {th}, {left_base} }},")
     output.append("};")
+    output += ["",
+               "/* Bird companion, its left-facing set, and the shield orb, taken",
+               "   from the level animation table rather than any event. */"]
+    for label, base, frames, tw, th in extra:
+        output.append(f"const Jj1EventSprite {n}_{label}_sprite = "
+                      f"{{ {base}, {frames}, {tw}, {th}, {base} }};")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(output) + "\n")
     print(f"Generated {args.output}: terrain, 8 Jazz frames, springs, and "

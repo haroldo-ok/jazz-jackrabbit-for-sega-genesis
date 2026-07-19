@@ -69,7 +69,8 @@ typedef int32_t s32;
 #define JJ1_PLAYER_SKID   8   /* PA_*STOP: skid/turn */
 #define JJ1_PLAYER_HURT   9
 #define JJ1_PLAYER_SPRING 10
-#define JJ1_PLAYER_STATES 11
+#define JJ1_PLAYER_BOARD  11   /* PA_*BOARD: riding the airboard */
+#define JJ1_PLAYER_STATES 12
 
 #define JAZZ_INPUT_LEFT  0x0001
 #define JAZZ_INPUT_RIGHT 0x0002
@@ -78,6 +79,7 @@ typedef int32_t s32;
 #define JAZZ_INPUT_START 0x0010
 #define JAZZ_INPUT_SWITCH 0x0020   /* cycle to the next available weapon */
 #define JAZZ_INPUT_DOWN   0x0040   /* crouch, and airboard descent */
+#define JAZZ_INPUT_UP     0x0080   /* look up, and airboard ascent */
 
 #define JAZZ_TILE_EMPTY    0
 #define JAZZ_TILE_SOLID    1

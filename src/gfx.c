@@ -33,7 +33,9 @@
     jj1_world##world##_block_tiles, jj1_world##world##_palette, jj1_level##n##_blocks, \
     jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_player_states, \
     jj1_level##n##_spring_tiles, \
-    jj1_level##n##_event_sprite_tiles, jj1_level##n##_event_sprites }
+    jj1_level##n##_event_sprite_tiles, jj1_level##n##_event_sprites, \
+    &jj1_level##n##_bird_sprite, &jj1_level##n##_bird_left_sprite, \
+    &jj1_level##n##_shield_sprite }
 
 const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT] = {
     STAGE(0, 000), STAGE(1, 000), STAGE(2, 000),

@@ -95,7 +95,26 @@ def runtime_records(level_path: Path):
     JJ1PANIMS = 38
     player_anim_block = r.rle(JJ1PANIMS * 2)
     player_anims = [player_anim_block[i << 1] for i in range(JJ1PANIMS)]
-    return grid, masks, eventset, start_x, start_y, anims, player_anims
+
+    # Level animations (JJ1LANIMS = 11) hold the bird, airboard and shield art.
+    # They sit past the bullet table and a variable-length palette-effect block,
+    # so rather than model that block we scan for the run of 11 bytes whose
+    # LA_UNKNOWN9 entry is 31 - the value JJ1Level::load itself expects there.
+    level_anims = [0] * 11
+    try:
+        r.skip(4)                      # JJ1MANIMS misc animation bytes
+        r.rle(32 * 20)                 # bullet definitions
+        r.skip_rle()                   # bullet names
+        tail = r.data[r.pos:r.pos + 4096]
+        for off in range(len(tail) - 11):
+            block = tail[off:off + 11]
+            if block[8] == 31 and all(b < 128 for b in block):
+                level_anims = list(block)
+                break
+    except Exception:
+        pass                           # leave zeros: the caller falls back
+
+    return grid, masks, eventset, start_x, start_y, anims, player_anims, level_anims
 
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
@@ -275,7 +294,7 @@ def main() -> None:
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims, _lanims = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])

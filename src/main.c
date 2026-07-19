@@ -42,6 +42,7 @@ static u16 input_from_pad(u16 pad)
     if (pad & BUTTON_A) input |= JAZZ_INPUT_FIRE;
     if (pad & BUTTON_C) input |= JAZZ_INPUT_SWITCH;   /* cycle weapons */
     if (pad & BUTTON_DOWN) input |= JAZZ_INPUT_DOWN;  /* crouch / airboard down */
+    if (pad & BUTTON_UP) input |= JAZZ_INPUT_UP;      /* look up / airboard up */
     if (pad & BUTTON_START) input |= JAZZ_INPUT_START;
     return input;
 }
@@ -512,6 +513,58 @@ static void render_sprites(void)
                              T_PLAYER, art->tilesW * art->tilesH, DMA);
             playerSlotFrame = wanted;
         }
+        /* Bird companion and shield orb share the second item slot, which is
+           free while they are on screen (both are small, single-cell art). */
+        if (game.player.bird && stageArt->bird && stageArt->bird->frames) {
+            const Jj1EventSprite *b =
+                game.player.facing ? stageArt->bird : stageArt->birdLeft;
+            u16 need = (u16)(b->tilesW * b->tilesH);
+            if (need <= JJ1_ITEM_SLOT_TILES) {
+                u8 frame = (u8)((game.frame >> 3) % b->frames);
+                u16 key = (u16)(0xB0 | frame);
+                u16 slot = T_ITEM_BASE + ((JJ1_ITEM_SLOTS - 1) * JJ1_ITEM_SLOT_TILES);
+                if (itemSlotEvent[JJ1_ITEM_SLOTS - 1] != key) {
+                    VDP_loadTileData(stageArt->spriteTiles +
+                        ((u32)(b->tile + (frame * need)) * 8), slot, need, DMA);
+                    itemSlotEvent[JJ1_ITEM_SLOTS - 1] = (u8)key;
+                }
+                put_sprite(&count, game.player.birdX - cameraX,
+                           game.player.birdY - cameraY,
+                           SPRITE_SIZE(b->tilesW, b->tilesH),
+                           TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, slot));
+            }
+        }
+
+        /* Shield: orbiting orbs, one per remaining hit, as the original draws
+           LA_4SHIELD/LA_1SHIELD circling the player at radius 20. */
+        if (game.player.shield && stageArt->shield && stageArt->shield->frames) {
+            static const s8 ring[8][2] = {
+                { 20, 0 }, { 14, 14 }, { 0, 20 }, { -14, 14 },
+                { -20, 0 }, { -14, -14 }, { 0, -20 }, { 14, -14 }
+            };
+            const Jj1EventSprite *sh = stageArt->shield;
+            u16 need = (u16)(sh->tilesW * sh->tilesH);
+            if (need <= JJ1_ITEM_SLOT_TILES) {
+                u16 slot = T_ITEM_BASE;
+                u8 phase = (u8)((game.frame >> 1) & 7);
+                u8 orbs = (game.player.shield > 4) ? 4 : game.player.shield;
+                u8 k;
+                if (itemSlotEvent[0] != 0xFE) {
+                    VDP_loadTileData(stageArt->spriteTiles + ((u32)sh->tile * 8),
+                                     slot, need, DMA);
+                    itemSlotEvent[0] = 0xFE;
+                }
+                for (k = 0; k < orbs; k++) {
+                    const s8 *o = ring[(phase + (k << 1)) & 7];
+                    put_sprite(&count,
+                               game.player.x - cameraX + (PLAYER_W >> 1) - 4 + o[0],
+                               game.player.y - cameraY + (PLAYER_H >> 1) - 4 + o[1],
+                               SPRITE_SIZE(sh->tilesW, sh->tilesH),
+                               TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, slot));
+                }
+            }
+        }
+
         /* Invincibility sparks: four sparkles orbiting the player, as the
            original draws with fSin/fCos at radius 12.  A small quarter-circle
            table avoids trig on the 68000. */

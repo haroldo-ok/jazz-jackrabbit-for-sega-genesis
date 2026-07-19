@@ -113,6 +113,9 @@ typedef struct {
     const u32 *springTiles;
     const u32 *spriteTiles;
     const Jj1EventSprite *sprites;
+    const Jj1EventSprite *bird;       /* companion, right-facing */
+    const Jj1EventSprite *birdLeft;
+    const Jj1EventSprite *shield;     /* orbiting shield orb */
 } Jj1StageArt;
 
 extern const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT];
