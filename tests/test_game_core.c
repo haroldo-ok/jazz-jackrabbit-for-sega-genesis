@@ -962,6 +962,73 @@ static void test_airboard(void)
     CHECK(g.player.y <= y0 + 2, "the airboard does not fall under gravity");
 }
 
+
+/* Modifier-38 zones cancel airboard flight on contact; the end sign with
+ * strength is finished by shooting it (Medivo 1 depends on both). */
+static void test_unboard_and_shot_end(void)
+{
+    int lvl, foundZone = 0, foundEnd = 0;
+
+    for (lvl = 0; lvl < JAZZ_STAGE_COUNT; lvl++) {
+        int gx, gy;
+        for (gy = 1; gy < 63; gy++)
+            for (gx = 1; gx < 255; gx++) {
+                const Jj1EventInfo *info =
+                    jj1_event_info((u8)lvl, jj1_runtime_event((u8)lvl, (s16)gx, (s16)gy));
+                if (!foundZone && info->klass == JJ1_CLASS_UNBOARD) {
+                    JazzGame g;
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    g.player.flying = 1;
+                    jazz_debug_place(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 6));
+                    jazz_step(&g, 0);
+                    CHECK(!g.player.flying, "an unboard zone cancels flight on touch");
+                    foundZone = 1;
+                }
+                if (!foundEnd && info->klass == JJ1_CLASS_END) {
+                    /* Shoot the sign's cell: the level must start ending. */
+                    JazzGame g;
+                    jazz_game_init(&g);
+                    jazz_debug_set_stage(&g, (u8)lvl);
+                    jazz_debug_shoot_cell(&g, (s16)((gx << 5) + 8), (s16)((gy << 5) + 8));
+                    CHECK(g.transitionTimer != 0, "shooting an end sign ends the level");
+                    foundEnd = 1;
+                }
+                if (foundZone && foundEnd) return;
+            }
+    }
+    CHECK(foundZone, "the levels contain airboard-off zones");
+    CHECK(foundEnd, "the levels contain end signs");
+}
+
+/* The bird fires bullet 30: two arcing shots at once. */
+static void test_bird_spread(void)
+{
+    JazzGame g;
+    int i, active = 0, arcing = 0;
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 0);
+    jazz_debug_place(&g, 300, 300);
+    g.player.bird = 1;
+    g.player.birdX = g.player.x;
+    g.player.birdY = (s16)(g.player.y - 20);
+    g.player.birdCooldown = 0;
+    /* Park an enemy ahead so the bird opens fire. */
+    g.enemies[0].active = 1;
+    g.enemies[0].klass = JJ1_CLASS_ENEMY_WALK;
+    g.enemies[0].hitPoints = 200;
+    g.enemies[0].x = (s16)(g.player.x + 80);
+    g.enemies[0].y = g.player.y;
+    jazz_step(&g, 0);
+    for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
+        if (!g.bullets[i].active) continue;
+        active++;
+        if ((g.bullets[i].vy < 0) && (g.bullets[i].gravity > 0)) arcing++;
+    }
+    CHECK(active == 2, "the bird fires two shots at once");
+    CHECK(arcing == 2, "both bird shots arc under gravity");
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -988,6 +1055,8 @@ int main(void)
     test_progress_survives_level_change();
     test_ammo_switch_only_when_new();
     test_airboard();
+    test_unboard_and_shot_end();
+    test_bird_spread();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return EXIT_FAILURE;

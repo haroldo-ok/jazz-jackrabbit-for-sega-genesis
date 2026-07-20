@@ -27,6 +27,7 @@ static u16 renderedDestroyCount;
 /* Which (event, frame) each enemy VRAM slot currently holds; 0xFFFF = unknown. */
 static u16 enemySlotArt[JAZZ_MAX_ENEMIES];
 static u16 playerSlotFrame;
+static u16 boardSlotKey;
 static u16 lastInput;
 static u8 selectedStage;   /* level select on the title screen */
 static u16 titlePreviousPad;
@@ -301,6 +302,7 @@ static void render_backdrop(u8 stage)
                      JJ1_SPRING_VARIANTS * JJ1_SPRING_TILES_PER_VARIANT, DMA);
     /* Force the streamed slots to refill against the new art. */
     playerSlotFrame = 0xFFFF;
+    boardSlotKey = 0xFFFF;
     for (u8 i = 0; i < JAZZ_MAX_ENEMIES; i++) enemySlotArt[i] = 0xFFFF;
 
     render_jj1_sky();
@@ -513,6 +515,28 @@ static void render_sprites(void)
                              T_PLAYER, art->tilesW * art->tilesH, DMA);
             playerSlotFrame = wanted;
         }
+        /* Airboard: the original draws the board sprite 10 px below the
+           player origin while flying, under the riding pose. */
+        if (game.player.flying && stageArt->board && stageArt->board->frames) {
+            const Jj1EventSprite *bd =
+                game.player.facing ? stageArt->board : stageArt->boardLeft;
+            u16 need = (u16)(bd->tilesW * bd->tilesH);
+            if (need <= JJ1_BOARD_SLOT_TILES) {
+                u8 frame = (u8)((game.frame >> 3) % bd->frames);
+                u16 wanted = (u16)(0x200 | (game.player.facing << 4) | frame);
+                if (boardSlotKey != wanted) {
+                    VDP_loadTileData(stageArt->spriteTiles +
+                        ((u32)(bd->tile + (frame * need)) * 8), T_BOARD, need, DMA);
+                    boardSlotKey = wanted;
+                }
+                put_sprite(&count,
+                           game.player.x - cameraX + (PLAYER_W >> 1) - (s16)(bd->tilesW << 2),
+                           game.player.y - cameraY + 10,
+                           SPRITE_SIZE(bd->tilesW, bd->tilesH),
+                           TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_BOARD));
+            }
+        }
+
         /* Bird companion and shield orb share the second item slot, which is
            free while they are on screen (both are small, single-cell art). */
         if (game.player.bird && stageArt->bird && stageArt->bird->frames) {
@@ -709,6 +733,7 @@ static void begin_play(void)
     renderedDestroyCount = game.destroyCount;
     for (u8 s = 0; s < JAZZ_MAX_ENEMIES; s++) enemySlotArt[s] = 0xFFFF;
     playerSlotFrame = 0xFFFF;
+    boardSlotKey = 0xFFFF;
     mode = MODE_PLAY;
 }
 

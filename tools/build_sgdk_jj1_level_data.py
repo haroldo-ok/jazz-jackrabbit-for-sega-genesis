@@ -120,7 +120,7 @@ def runtime_records(level_path: Path):
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
 CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
     CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE, \
-    CLASS_BRIDGE = range(11)
+    CLASS_BRIDGE, CLASS_UNBOARD = range(12)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO, \
     ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP, ITEM_BIRD, ITEM_AIRBOARD = range(10)
 
@@ -185,6 +185,8 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     if modifier == 7:
         return CLASS_NONE, 0, 0, 0
 
+    if modifier == 38:                   # "Airboard, etc. off" zone
+        return CLASS_UNBOARD, 0, 0, 0
     if modifier == 6:
         return CLASS_ONEWAY, 0, 0, 0
     if modifier in (8, 27, 41):          # boss / end of level / bonus level

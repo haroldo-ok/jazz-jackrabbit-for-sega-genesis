@@ -242,13 +242,40 @@ def main() -> None:
                     out.append(sprite)
         return out
 
+    LA_LBOARD, LA_RBOARD = 4, 5
+
+    def crop_sprite(sprite, max_w, max_h):
+        """Centre-crop a sprite to fit a VRAM slot; the bird is 33-36 px wide,
+        just over the 32 px cell, so trimming the wingtip edges beats not
+        drawing it at all (which is what the slot-size guard used to do)."""
+        w, h, px = sprite
+        if w <= max_w and h <= max_h:
+            return sprite
+        cw, ch = min(w, max_w), min(h, max_h)
+        x0 = (w - cw) // 2
+        y0 = (h - ch) // 2
+        out = bytearray()
+        for y in range(ch):
+            row = px[(y0 + y) * w + x0:(y0 + y) * w + x0 + cw]
+            out.extend(row)
+        return (cw, ch, bytes(out))
+
     bird_frames = frames_for_level_anim(LA_RBIRD) or frames_for_level_anim(LA_LBIRD)
     bird_left_frames = frames_for_level_anim(LA_LBIRD)
     shield_frames = frames_for_level_anim(LA_1SHIELD) or frames_for_level_anim(LA_4SHIELD)
+    board_frames = frames_for_level_anim(LA_RBOARD) or frames_for_level_anim(LA_LBOARD)
+    board_left_frames = frames_for_level_anim(LA_LBOARD)
     blank = (8, 8, bytes([SKEY]) * 64)
     if not bird_frames: bird_frames = [blank]
     if not bird_left_frames: bird_left_frames = bird_frames
     if not shield_frames: shield_frames = [blank]
+    if not board_frames: board_frames = [blank]
+    if not board_left_frames: board_left_frames = board_frames
+    # Fit the fixed VRAM slots: bird 32x32 (16 tiles), board 32x24 (12 tiles).
+    bird_frames = [crop_sprite(f, 32, 32) for f in bird_frames]
+    bird_left_frames = [crop_sprite(f, 32, 32) for f in bird_left_frames]
+    board_frames = [crop_sprite(f, 32, 24) for f in board_frames]
+    board_left_frames = [crop_sprite(f, 32, 24) for f in board_left_frames]
 
     # Resolve every event that appears in this level through its animation,
     # rather than guessing sprite numbers.  JJ1 keeps separate art for each
@@ -408,7 +435,8 @@ def main() -> None:
     # Bird (both facings) and shield share the event sprite bank.
     extra = []
     for label, frames in (("bird", bird_frames), ("bird_left", bird_left_frames),
-                          ("shield", shield_frames)):
+                          ("shield", shield_frames), ("board", board_frames),
+                          ("board_left", board_left_frames)):
         cw, ch = cell_size(frames)
         base = len(enemy_words) // 8
         for sprite in frames:
