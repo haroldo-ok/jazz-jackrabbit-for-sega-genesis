@@ -56,7 +56,11 @@
 #define JJ1_ITEM_SLOTS 2
 #define JJ1_ITEM_SLOT_TILES 16
 #define T_ITEM_BASE  (T_ENEMY_BASE + (JJ1_ENEMY_SLOTS * JJ1_ENEMY_SLOT_TILES))
-#define T_GEM        (T_ITEM_BASE + (JJ1_ITEM_SLOTS * JJ1_ITEM_SLOT_TILES))
+/* The airboard has its own small slot so it can coexist with the shield and
+ * bird, which occupy the two item slots. */
+#define JJ1_BOARD_SLOT_TILES 12
+#define T_BOARD      (T_ITEM_BASE + (JJ1_ITEM_SLOTS * JJ1_ITEM_SLOT_TILES))
+#define T_GEM        (T_BOARD + JJ1_BOARD_SLOT_TILES)
 #define T_BULLET     (T_GEM + 1)
 #define T_JJ1_SKY    (T_BULLET + 1)
 #define T_JJ1_LEVEL0_SCREEN (T_JJ1_SKY + 8)
@@ -116,6 +120,8 @@ typedef struct {
     const Jj1EventSprite *bird;       /* companion, right-facing */
     const Jj1EventSprite *birdLeft;
     const Jj1EventSprite *shield;     /* orbiting shield orb */
+    const Jj1EventSprite *board;      /* airboard, drawn under the rider */
+    const Jj1EventSprite *boardLeft;
 } Jj1StageArt;
 
 extern const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT];

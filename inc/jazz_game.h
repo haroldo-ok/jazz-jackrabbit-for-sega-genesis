@@ -224,6 +224,7 @@ void jazz_debug_place(JazzGame *game, s16 x, s16 y);
 /* Rebuild the game on a given stage (tests only). */
 void jazz_debug_set_stage(JazzGame *game, u8 stage);
 void jazz_debug_hurt(JazzGame *game);
+void jazz_debug_shoot_cell(JazzGame *game, s16 x, s16 y);
 /* Y coordinate of the player's feet, i.e. the bottom of the collision body. */
 s16 jazz_player_feet(const JazzGame *game);
 /* Current player animation state (JJ1_PLAYER_* in jazz_gfx.h), derived from

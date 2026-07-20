@@ -531,6 +531,15 @@ static void bullet_hits_scenery(JazzGame *g, s16 x, s16 y)
     if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return;
     if (jazz_cell_destroyed(g, (u8)gx, (u8)gy)) return;
     info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
+    /* An end sign with strength (Medivo's is strength 1) is finished by
+       shooting it: hitEvent routes the last hit through takeEvent, whose
+       case 27 ends the level.  Touch cannot reach it there, so without this
+       the level cannot be completed at all. */
+    if ((info->klass == JJ1_CLASS_END) && !g->transitionTimer) {
+        g->transitionTimer = 75;
+        g->events |= JAZZ_EVENT_EXIT;
+        return;
+    }
     /* A pickup with strength is a crate: shooting it open is the only way to
        take it, and the contents are granted exactly as on a touch pickup. */
     if ((info->klass == JJ1_CLASS_ITEM) && info->strength) {
@@ -573,24 +582,32 @@ static void update_bird(JazzGame *g)
             if (dy < 0) dy = (s16)-dy;
             if (dy > 48) continue;
         }
-        /* Fire a blaster bolt from the bird. */
+        /* The bird fires bullet 30, whose definition holds BOTH speed pairs
+           (xspeed +-2 and +-3, yspeed -1 and -2, gravity): two shots leave at
+           once and arc downward, which is what lets it drop fire onto enemies
+           the flat bolt used to sail over. */
         {
-            u8 i;
-            for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
-                JazzBullet *b = &g->bullets[i];
-                if (b->active) continue;
-                b->active = 1;
-                b->x = p->birdX;
-                b->y = p->birdY;
-                b->vx = (s16)(p->facing ? 1000 : -1000);
-                b->vy = 0;
-                b->subX = 0;
-                b->subY = 0;
-                b->gravity = 0;
-                b->behaviour = 0;
-                p->birdCooldown = 30;
-                g->events |= JAZZ_EVENT_FIRE;
-                break;
+            static const s16 birdVx[2] = { 1400, 1700 };
+            static const s16 birdVy[2] = { -250, -500 };
+            u8 shot;
+            for (shot = 0; shot < 2; shot++) {
+                u8 i;
+                for (i = 0; i < JAZZ_MAX_BULLETS; i++) {
+                    JazzBullet *b = &g->bullets[i];
+                    if (b->active) continue;
+                    b->active = 1;
+                    b->x = p->birdX;
+                    b->y = p->birdY;
+                    b->vx = (s16)(p->facing ? birdVx[shot] : -birdVx[shot]);
+                    b->vy = birdVy[shot];
+                    b->subX = 0;
+                    b->subY = 0;
+                    b->gravity = 24;     /* same scale the bouncer uses */
+                    b->behaviour = 0;
+                    p->birdCooldown = 30;
+                    g->events |= JAZZ_EVENT_FIRE;
+                    break;
+                }
             }
         }
         break;
@@ -827,6 +844,12 @@ static void collect_grid_items(JazzGame *g)
             const Jj1EventInfo *info;
             if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) continue;
             info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
+            if (info->klass == JJ1_CLASS_UNBOARD) {
+                /* Modifier 38: "Airboard, etc. off".  The zone persists and
+                   simply cancels flight on contact, as touchEvent case 38. */
+                g->player.flying = 0;
+                continue;
+            }
             if (info->klass != JJ1_CLASS_ITEM) continue;
             if (jazz_event_taken(g, (u8)gx, (u8)gy)) continue;
             /* Only a zero-strength pickup is grabbed by walking into it; one
@@ -926,6 +949,16 @@ void jazz_debug_place(JazzGame *g, s16 x, s16 y)
 void jazz_debug_grant(JazzGame *g, const Jj1EventInfo *info)
 {
     grant_item(g, info, 0, 0);
+}
+
+/* Test hook: land a bullet on a grid cell, as update_bullets would. */
+void jazz_debug_shoot_cell(JazzGame *g, s16 x, s16 y)
+{
+#ifdef JAZZ_JJ1_RUNTIME
+    bullet_hits_scenery(g, x, y);
+#else
+    (void)g; (void)x; (void)y;
+#endif
 }
 
 void jazz_debug_hurt(JazzGame *g)
