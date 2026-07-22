@@ -19,7 +19,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).parent))
-from import_jj1_shareware import (SKEY, TRANSPARENT, decode_anims, decode_blocks,
+from import_jj1_shareware import (
+    decode_sprite_offsets,SKEY, TRANSPARENT, decode_anims, decode_blocks,
                                   decode_mainchar, decode_sprite_set)
 from build_sgdk_jj1_level_data import runtime_records
 
@@ -120,6 +121,10 @@ def event_frames(eventset: bytes, anims: list[dict], event_id: int, facing: str 
 # chunk are column-major, which is the order the VDP fetches them in.
 MAX_CELL_W = 64      # 8 tiles
 MAX_CELL_H = 48      # 6 tiles
+# The episode guardian is 96x55, far larger than any walker.  It gets its own
+# cell size and, on the ROM side, a two-slot VRAM region.
+BOSS_CELL_W = 96     # 12 tiles
+BOSS_CELL_H = 56     # 7 tiles -> 84 tiles, spanning two enemy slots
 
 
 def sprite_to_image(sprite, source_palette, w, h):
@@ -143,12 +148,14 @@ def sprite_to_image(sprite, source_palette, w, h):
     return cell.convert("RGB"), mask
 
 
-def cell_size(frames) -> tuple[int, int]:
+def cell_size(frames, big: bool = False) -> tuple[int, int]:
     """Cell big enough for every frame of one event, in whole tiles."""
     w = max(f[0] for f in frames)
     h = max(f[1] for f in frames)
-    w = min(((w + 7) // 8) * 8, MAX_CELL_W)
-    h = min(((h + 7) // 8) * 8, MAX_CELL_H)
+    max_w = BOSS_CELL_W if big else MAX_CELL_W
+    max_h = BOSS_CELL_H if big else MAX_CELL_H
+    w = min(((w + 7) // 8) * 8, max_w)
+    h = min(((h + 7) // 8) * 8, max_h)
     return max(w, 8), max(h, 8)
 
 
@@ -176,7 +183,11 @@ def main() -> None:
     parser.add_argument("--level", default="LEVEL0.000",
                         help="level whose event/animation records name the sprites")
     parser.add_argument("--world", default="000",
-                        help="BLOCKS/SPRITES suffix for that level's world")
+                        help="BLOCKS suffix for that level's tile world")
+    parser.add_argument("--sprite-world", default=None,
+                        help="SPRITES suffix; defaults to --world.  The guardian "
+                             "stage borrows Medivo's tiles but ships its own "
+                             "sprite bank, so the two differ there")
     parser.add_argument("--name", default="jj1_level0",
                         help="symbol prefix; each level has its own animation "
                              "table, so sprites are resolved per level")
@@ -188,7 +199,7 @@ def main() -> None:
     args = parser.parse_args()
 
     tiles, source_palette, _sky = decode_blocks(args.input / f"BLOCKS.{args.world}")
-    sprite_file = args.input / f"SPRITES.{args.world}"
+    sprite_file = args.input / f"SPRITES.{args.sprite_world or args.world}"
     # loadSprites() in the original "loads all the sprites, not just those in
     # fileName": it walks MAINCHAR.000 and SPRITES.<world> in parallel, the
     # world file overriding.  decode_mainchar does exactly that merge, and the
@@ -196,7 +207,7 @@ def main() -> None:
     # SPRITES.<world> yields a mostly-empty bank.
     sprites = decode_mainchar(args.input / "MAINCHAR.000", sprite_file)
     bank = sprites
-    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims, level_anims = runtime_records(args.input / args.level)
+    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims, level_anims, bullet_defs = runtime_records(args.input / args.level)
     anims = decode_anims(anim_bytes)
     # The first eight MAINCHAR records are consecutive original Jazz walk
     # frames in the Episode 1 shareware data. Keep all of them resident so the
@@ -364,11 +375,34 @@ def main() -> None:
     enemy_cells: dict[int, tuple[int, int]] = {}
     enemy_images_left: dict[int, list] = {}
     enemy_masks_left: dict[int, list] = {}
+    def anim_record(index):
+        b = anim_bytes[index * 64:(index + 1) * 64]
+        if len(b) < 7:
+            return None
+        sgn = lambda v: v - 256 if v > 127 else v
+        n = b[6]
+        return {"shootX": sgn(b[0]), "shootY": sgn(b[1]), "accessory": b[2],
+                "accX": sgn(b[3]), "accY": sgn(b[4]), "yOff": sgn(b[5]),
+                "count": n,
+                "xo": [sgn(b[26 + k]) for k in range(n)],
+                "yo": [sgn(b[45 + k]) for k in range(n)]}
+
+    def frames_for_anim(index, limit=MAX_FRAMES):
+        out = []
+        if index and index < len(anims):
+            for frame in anims[index]["frames"][:limit]:
+                sprite = bank[frame["sprite"]] if frame["sprite"] < len(bank) else None
+                if sprite is not None:
+                    out.append(sprite)
+        return out
+
+    boss_ids = {i for i in event_sprites
+                if len(eventset) >= (i + 1) * 32 and eventset[i * 32 + 4] == 41}
     for event_id, frames in event_sprites.items():
         left_frames = event_sprites_left.get(event_id, [])
         # Both facings share one cell size, so nothing shifts when direction
         # flips mid-walk.
-        cw, ch = cell_size(frames + left_frames)
+        cw, ch = cell_size(frames + left_frames, event_id in boss_ids)
         enemy_cells[event_id] = (cw, ch)
         images, masks = [], []
         for sprite in frames:
@@ -434,10 +468,74 @@ def main() -> None:
 
     # Bird (both facings) and shield share the event sprite bank.
     extra = []
-    for label, frames in (("bird", bird_frames), ("bird_left", bird_left_frames),
-                          ("shield", shield_frames), ("board", board_frames),
-                          ("board_left", board_left_frames)):
-        cw, ch = cell_size(frames)
+    # Guardian accessory (the cannon): one per facing, positioned by the body
+    # animation's accessoryX/Y.  Without it the boss is a hull with no gun.
+    sprite_anchors = decode_sprite_offsets(sprite_file)
+    boss_acc = {}
+    boss_late = {}
+    for boss_id in sorted(boss_ids):
+        rec = eventset[boss_id * 32:(boss_id + 1) * 32]
+        # Stage 0 body (bytes 5/6) and its cannon; the charging stage swaps to
+        # the E_*FINISHANIM pair (bytes 28/29, masked to 0x7F as the engine
+        # does) whose accessory is the drill spike.
+        for label, byte, mask in (("boss_cannon", 6, False), ("boss_cannon_left", 5, False),
+                                  ("boss_spike", 29, True), ("boss_spike_left", 28, True)):
+            anim_byte = rec[byte] & 0x7F if mask else rec[byte]
+            body = anim_record(anim_byte)
+            if not body or not body["accessory"]:
+                continue
+            acc_frames = frames_for_anim(body["accessory"])
+            if not acc_frames:
+                continue
+            # The accessory is placed relative to the body sprite's own corner,
+            # so the per-frame offsets of both animations cancel into a fixed
+            # delta for this event.
+            body_xo = body.get("xo", [0])[0] if body.get("xo") else 0
+            body_yo = body.get("yo", [0])[0] if body.get("yo") else 0
+            acc_rec = anim_record(body["accessory"]) or {}
+            acc_xo = acc_rec.get("xo", [0])[0] if acc_rec.get("xo") else 0
+            acc_yo = acc_rec.get("yo", [0])[0] if acc_rec.get("yo") else 0
+            # Each sprite also carries its own draw anchor, which the engine
+            # adds on top.  The left and right art use different anchors, so
+            # leaving them out aligns one facing and skews the other.
+            body_first = anims[anim_byte]["frames"][0]["sprite"] if anims[anim_byte]["frames"] else 0
+            acc_anim = anims[body["accessory"]]["frames"]
+            acc_first = acc_anim[0]["sprite"] if acc_anim else 0
+            b_anchor = sprite_anchors[body_first] if body_first < len(sprite_anchors) else (0, 0)
+            a_anchor = sprite_anchors[acc_first] if acc_first < len(sprite_anchors) else (0, 0)
+            dx = (body["accX"] + acc_xo - body_xo) * 4 + (a_anchor[0] - b_anchor[0])
+            dy = body["accY"] + acc_yo - body_yo + (a_anchor[1] - b_anchor[1])
+            boss_acc[label] = (acc_frames, dx, dy)
+        # The charging body itself.
+        for label, byte in (("boss_late", 29), ("boss_late_left", 28)):
+            frames = frames_for_anim(rec[byte] & 0x7F)
+            if frames:
+                boss_late[label] = frames
+
+    extras = [("bird", bird_frames), ("bird_left", bird_left_frames),
+              ("shield", shield_frames), ("board", board_frames),
+              ("board_left", board_left_frames)]
+    extras += [(name, data[0]) for name, data in sorted(boss_acc.items())]
+    extras += [(name, frames) for name, frames in sorted(boss_late.items())]
+
+    # The guardian's shot: its event names a bullet index, and that bullet's
+    # record names the sprite for each direction.
+    shot_frames = []
+    for boss_id in sorted(boss_ids):
+        rec = eventset[boss_id * 32:(boss_id + 1) * 32]
+        bullet = rec[12]
+        if bullet >= 32 or len(bullet_defs) < (bullet + 1) * 20:
+            continue
+        for idx in (bullet_defs[bullet * 20], bullet_defs[bullet * 20 + 1]):
+            sprite = bank[idx] if idx < len(bank) else None
+            if sprite is not None:
+                shot_frames = [sprite]
+                break
+        break
+    if shot_frames:
+        extras.append(("boss_shot", shot_frames))
+    for label, frames in extras:
+        cw, ch = cell_size(frames, label.startswith("boss_late"))
         base = len(enemy_words) // 8
         for sprite in frames:
             image, mask = sprite_to_image(sprite, source_palette, cw, ch)
@@ -446,6 +544,8 @@ def main() -> None:
 
     per_frame = {e: (d[2] * d[3]) for e, d in descriptors.items()}
     biggest = max(per_frame.values())
+    ordinary = [t for e, t in per_frame.items() if e not in boss_ids]
+    biggest = max(ordinary) if ordinary else 0
     if biggest > JJ1_ENEMY_SLOT_TILES:
         raise SystemExit(
             f"an event frame needs {biggest} tiles but a VRAM slot holds "
@@ -513,6 +613,18 @@ def main() -> None:
     for label, base, frames, tw, th in extra:
         output.append(f"const Jj1EventSprite {n}_{label}_sprite = "
                       f"{{ {base}, {frames}, {tw}, {th}, {base} }};")
+    for name, (_f, ax, ay) in sorted(boss_acc.items()):
+        output.append(f"const s16 {n}_{name}_x = {ax};")
+        output.append(f"const s16 {n}_{name}_y = {ay};")
+    for label in ("boss_cannon", "boss_cannon_left", "boss_spike", "boss_spike_left"):
+        if label not in boss_acc:
+            output += [f"const Jj1EventSprite {n}_{label}_sprite = {{ 0, 0, 1, 1, 0 }};",
+                       f"const s16 {n}_{label}_x = 0;", f"const s16 {n}_{label}_y = 0;"]
+    for label in ("boss_late", "boss_late_left"):
+        if label not in boss_late:
+            output.append(f"const Jj1EventSprite {n}_{label}_sprite = {{ 0, 0, 1, 1, 0 }};")
+    if not shot_frames:
+        output.append(f"const Jj1EventSprite {n}_boss_shot_sprite = {{ 0, 0, 1, 1, 0 }};")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(output) + "\n")
     print(f"Generated {args.output}: terrain, 8 Jazz frames, springs, and "

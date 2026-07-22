@@ -235,6 +235,22 @@ static void build_stage(JazzGame *g, u8 stage)
 
 #ifdef JAZZ_JJ1_RUNTIME
     jj1_runtime_place_player(g, stage);
+
+    /* Find the stage's guardian, if any, so it can be woken from far away:
+       a boss must not sleep behind the ordinary walker activation window. */
+    g->bossPresent = 0;
+    {
+        s16 bx, by;
+        for (by = 0; by < 64 && !g->bossPresent; by++)
+            for (bx = 0; bx < 256; bx++)
+                if (jj1_event_info(stage, jj1_runtime_event(stage, bx, by))->klass
+                    == JJ1_CLASS_BOSS) {
+                    g->bossGridX = (u8)bx;
+                    g->bossGridY = (u8)by;
+                    g->bossPresent = 1;
+                    break;
+                }
+    }
     count_stage_items(g);
 #else
     {
@@ -484,6 +500,12 @@ static void kill_enemy(JazzGame *g, JazzEnemy *e)
     g->events |= JAZZ_EVENT_KILL;
 #ifdef JAZZ_JJ1_RUNTIME
     mark_event_taken(g, e->gridX, e->gridY);
+    /* Defeating the guardian (modifier 8) ends the level, the same way the
+       exit sign does. */
+    if ((e->klass == JJ1_CLASS_BOSS) && !g->transitionTimer) {
+        g->transitionTimer = 75;
+        g->events |= JAZZ_EVENT_EXIT;
+    }
 #endif
 }
 
@@ -604,6 +626,7 @@ static void update_bird(JazzGame *g)
                     b->subY = 0;
                     b->gravity = 24;     /* same scale the bouncer uses */
                     b->behaviour = 0;
+                    b->hostile = 0;
                     p->birdCooldown = 30;
                     g->events |= JAZZ_EVENT_FIRE;
                     break;
@@ -612,6 +635,26 @@ static void update_bird(JazzGame *g)
         }
         break;
     }
+}
+
+/* Damage box for an enemy.  Ordinary enemies use the shared collision body;
+ * the guardian is far larger than that, and giving it a walker's box meant
+ * almost every shot passed through it and its energy bar never moved. */
+static void enemy_hit_box(const JazzEnemy *e, s16 *bx, s16 *by, s16 *bw, s16 *bh)
+{
+#ifdef JAZZ_JJ1_RUNTIME
+    if (e->klass == JJ1_CLASS_BOSS) {
+        *bw = 96;
+        *bh = 56;
+        *bx = (s16)(e->x + (JAZZ_ENEMY_W >> 1) - (*bw >> 1));
+        *by = (s16)(e->y + JAZZ_ENEMY_H - *bh);
+        return;
+    }
+#endif
+    *bx = e->x;
+    *by = e->y;
+    *bw = ENEMY_W;
+    *bh = ENEMY_H;
 }
 
 static void update_bullets(JazzGame *g)
@@ -670,13 +713,26 @@ static void update_bullets(JazzGame *g)
             }
         }
         if ((b->x < g->player.x - 400) || (b->x > g->player.x + 400)) { b->active = 0; continue; }
+        if (b->hostile) {
+            /* A boss shot: it can only hit the player. */
+            if (rect_overlap(b->x, b->y, 4, 4, g->player.x, g->player.y, PLAYER_W, PLAYER_H)) {
+                b->active = 0;
+                hurt_player(g);
+            }
+            continue;
+        }
         for (e = 0; e < JAZZ_MAX_ENEMIES; e++) {
             JazzEnemy *en = &g->enemies[e];
             if (!en->active) continue;
 #ifdef JAZZ_JJ1_RUNTIME
             if (en->klass == JJ1_CLASS_HAZARD) continue; /* not shootable */
 #endif
-            if (rect_overlap(b->x, b->y, 4, 4, en->x, en->y, ENEMY_W, ENEMY_H)) {
+            {
+                s16 hx, hy, hw, hh;
+                enemy_hit_box(en, &hx, &hy, &hw, &hh);
+                if (!rect_overlap(b->x, b->y, 4, 4, hx, hy, hw, hh)) continue;
+            }
+            {
                 b->active = 0;
                 if (en->hitPoints > 1) en->hitPoints--;
                 else kill_enemy(g, en);
@@ -689,6 +745,14 @@ static void update_bullets(JazzGame *g)
 #ifdef JAZZ_JJ1_RUNTIME
 
 /* Sine-ish bob table for flyers, amplitude 16px over 64 phases. */
+/* Full sine wave, 64 steps, amplitude 127: drives the guardian's hover. */
+static const s8 jj1_sin64[64] = {
+    0, 12, 25, 37, 49, 60, 71, 81, 90, 98, 106, 112, 118, 122, 125, 127,
+    127, 127, 125, 122, 118, 112, 106, 98, 90, 81, 71, 60, 49, 37, 25, 12,
+    0, -12, -25, -37, -49, -60, -71, -81, -90, -98, -106, -112, -118, -122, -125, -127,
+    -127, -127, -125, -122, -118, -112, -106, -98, -90, -81, -71, -60, -49, -37, -25, -12
+};
+
 static const s8 jj1_bob[64] = {
       0,  2,  3,  5,  6,  8,  9, 10, 12, 13, 14, 14, 15, 16, 16, 16,
      16, 16, 16, 15, 14, 14, 13, 12, 10,  9,  8,  6,  5,  3,  2,  0,
@@ -700,10 +764,23 @@ static void spawn_grid_enemy(JazzGame *g, u8 gx, u8 gy, u8 klass, u8 strength)
 {
     u8 i;
     JazzEnemy *e = 0;
+    /* The guardian's art is far bigger than a walker's and spans two VRAM
+       slots, so it always takes pool slot 0 and ordinary enemies keep clear of
+       slot 1 while a stage has one.  Otherwise a walker's tiles would land in
+       the half of the boss the renderer is still using. */
+    u8 first = (u8)((klass == JJ1_CLASS_BOSS) ? 0
+                                              : (g->bossPresent ? JJ1_BOSS_SLOT_SPAN : 0));
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++) {
         if (g->enemies[i].active) {
             if ((g->enemies[i].gridX == gx) && (g->enemies[i].gridY == gy)) return;
-        } else if (!e) e = &g->enemies[i];
+        }
+    }
+    if (klass == JJ1_CLASS_BOSS) {
+        if (g->enemies[0].active) return;      /* already awake */
+        e = &g->enemies[0];
+    } else {
+        for (i = first; i < JAZZ_MAX_ENEMIES; i++)
+            if (!g->enemies[i].active) { e = &g->enemies[i]; break; }
     }
     if (!e) return;
     e->active = 1;
@@ -755,14 +832,30 @@ static void scan_grid_enemies(JazzGame *g)
         const Jj1EventInfo *info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
         if (((info->klass == JJ1_CLASS_ENEMY_WALK) ||
              (info->klass == JJ1_CLASS_ENEMY_FLY) ||
+             (info->klass == JJ1_CLASS_BOSS) ||
              (info->klass == JJ1_CLASS_HAZARD)) &&
             !jazz_event_taken(g, (u8)gx, (u8)gy))
             spawn_grid_enemy(g, (u8)gx, (u8)gy, info->klass, info->strength);
     }
 
+    /* The guardian wakes from anywhere within two screens of its arena, and
+       once woken it stays in play until killed - a boss that dozes off (or
+       never wakes) behind the walkers' small activation window reads as "the
+       boss never spawned". */
+    if (g->bossPresent && !jazz_event_taken(g, g->bossGridX, g->bossGridY)) {
+        s16 bx = (s16)(((s16)g->bossGridX << 5) + 16);
+        s16 by = (s16)(((s16)g->bossGridY << 5) + 16);
+        if ((bx > px - 512) && (bx < px + 512) && (by > py - 384) && (by < py + 384)) {
+            const Jj1EventInfo *info = jj1_event_info(g->stage,
+                jj1_runtime_event(g->stage, g->bossGridX, g->bossGridY));
+            spawn_grid_enemy(g, g->bossGridX, g->bossGridY, info->klass, info->strength);
+        }
+    }
+
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++) {
         JazzEnemy *e = &g->enemies[i];
         if (!e->active) continue;
+        if (e->klass == JJ1_CLASS_BOSS) continue;   /* the guardian never sleeps */
         if ((e->x < px - JJ1_DEACTIVATE_MARGIN) || (e->x > px + JJ1_DEACTIVATE_MARGIN) ||
             (e->y < py - JJ1_DEACTIVATE_MARGIN) || (e->y > py + JJ1_DEACTIVATE_MARGIN))
             e->active = 0; /* despawn without marking taken: it respawns on return */
@@ -886,6 +979,121 @@ static void update_enemies(JazzGame *g)
             e->x += e->direction;
             if ((e->x < e->homeX - 48) || (e->x > e->homeX + 48)) e->direction = -e->direction;
         }
+        else if (e->klass == JJ1_CLASS_BOSS) {
+            /* Episode guardian, following the reference state machine.  Stage 0
+               is a four-part circuit: it sweeps one way facing left (states 1
+               and 2), then back facing right (3 and 4), switching whenever the
+               cosine changes sign.  That quadrant walk is what makes it turn to
+               face its travel, which a single +-1 direction could not express.
+               At half hits it drops to a lane and charges (state 8). */
+            const Jj1EventInfo *bi = jj1_event_info(g->stage,
+                jj1_runtime_event(g->stage, e->gridX, e->gridY));
+            u8 total = bi->strength ? bi->strength : 2;
+            u8 spent = (u8)(total - e->hitPoints);
+            s16 sn, cs;
+            e->phase = (u8)((e->phase + 1) & 63);
+            sn = jj1_sin64[e->phase];
+            cs = jj1_sin64[(e->phase + 16) & 63];
+            if (e->direction < 1 || e->direction > 9) e->direction = 1;
+
+            if (spent < (u8)(total >> 1)) {
+                /* Stage 0: the elliptical circuit, +-96 px by +-64 px. */
+                switch (e->direction) {
+                case 1:
+                    e->x = (s16)(e->homeX + ((sn * 96) >> 7) + 96);
+                    e->y = (s16)(e->homeY - ((cs * 64) >> 7));
+                    if (cs > 0) e->direction = 2;
+                    break;
+                case 2:
+                    e->x = (s16)(e->homeX - ((sn * 96) >> 7) - 96);
+                    e->y = (s16)(e->homeY - ((cs * 64) >> 7));
+                    if (cs < 0) e->direction = 3;
+                    break;
+                case 3:
+                    e->x = (s16)(e->homeX - ((sn * 96) >> 7) - 96);
+                    e->y = (s16)(e->homeY - ((cs * 64) >> 7));
+                    if (cs > 0) e->direction = 4;
+                    break;
+                default:
+                    e->x = (s16)(e->homeX + ((sn * 96) >> 7) + 96);
+                    e->y = (s16)(e->homeY - ((cs * 64) >> 7));
+                    if (cs < 0) e->direction = 1;
+                    break;
+                }
+                e->bossFacing = (u8)(e->direction <= 2);
+                /* Fire on the event's own bulletPeriod. */
+                if ((g->frame % 128) == 0) {
+                    u8 bs;
+                    for (bs = 0; bs < JAZZ_MAX_BULLETS; bs++) {
+                        JazzBullet *b = &g->bullets[bs];
+                        if (b->active) continue;
+                        b->active = 1;
+                        /* Leave the cannon's muzzle.  The gun is drawn from the
+                           body cell's corner, which sits at
+                           x - 41 / y - 40 relative to the collision origin, so
+                           spawning from the origin put the shot below the hull
+                           and inside the floor, where it died on its first
+                           step - the guardian looked like it never fired. */
+                        b->x = (s16)(e->x + ((e->direction >= 3) ? 87 : -73));
+                        b->y = (s16)(e->y - 3);
+                        b->vx = (s16)((e->direction >= 3) ? 1400 : -1400);
+                        b->vy = 0;
+                        b->subX = 0;
+                        b->subY = 0;
+                        b->gravity = 0;
+                        b->behaviour = 0;
+                        b->hostile = 1;
+                        break;
+                    }
+                }
+            } else {
+                /* Stage 1: the drill.  It settles into a lane, then charges
+                   along it rising and falling with the cosine.  When it comes
+                   down on solid ground it bores in (state 9) and smashes the
+                   block beneath its centre before bouncing back up. */
+                s16 lane = (s16)(e->homeY + 40);
+                s16 amp = (s16)(cs < 0 ? -cs : cs);
+                s16 centreX = (s16)(e->x + (JAZZ_ENEMY_W >> 1));
+                if (e->direction < 5) e->direction = (e->y > lane) ? 5 : 6;
+                if (e->direction == 5) {
+                    if (e->y > lane) e->y -= 2; else e->direction = 8;
+                } else if (e->direction == 6) {
+                    if (e->y < lane) e->y += 2; else e->direction = 8;
+                } else if (e->direction == 8) {
+                    s16 step = (s16)((amp * 6) >> 7);
+                    e->y = (s16)(lane - ((amp * 96) >> 7));
+                    e->x = (s16)(e->x + (e->bossFacing ? -step : step));
+                    /* Turn around at the edges of the arena. */
+                    if (e->x < e->homeX - 128) e->bossFacing = 0;
+                    if (e->x > e->homeX + 128) e->bossFacing = 1;
+                    /* Descending onto solid ground: start drilling. */
+                    if (cs < 0 && jj1_runtime_down_point_solid(g->stage, centreX,
+                                                               (s16)(e->y + 32)))
+                        e->direction = 9;
+                } else {
+                    /* Drilling: judder in place, then break the floor as the
+                       cosine turns back up, exactly where the original swaps
+                       the tile under the drill's centre. */
+                    e->x = (s16)(e->x + ((e->x & 1) ? 1 : -1));
+                    /* The original waits for the cosine to turn back up
+                       through a narrow window.  This 64-step table steps
+                       0, 12, 25..., so match the crossing inclusively or it
+                       falls between two samples and the floor never breaks. */
+                    if (cs >= 0 && cs <= 12) {
+                        /* Break the row directly below the guardian's own, as
+                           the original does with FTOT(y) + 1.  Probing deeper
+                           punched through to a lower course and left the top
+                           layer of the floor standing. */
+                        s16 bgx = (s16)(centreX >> 5);
+                        s16 bgy = (s16)((e->y >> 5) + 1);
+                        if ((bgx >= 0) && (bgx < 256) && (bgy >= 0) && (bgy < 64) &&
+                            !jazz_cell_destroyed(g, (u8)bgx, (u8)bgy))
+                            destroy_cell(g, (u8)bgx, (u8)bgy);
+                        e->direction = 8;
+                    }
+                }
+            }
+        }
         /* JJ1_CLASS_HAZARD stays still. */
 #else
         e->x += e->direction;
@@ -959,6 +1167,13 @@ void jazz_debug_shoot_cell(JazzGame *g, s16 x, s16 y)
 #else
     (void)g; (void)x; (void)y;
 #endif
+}
+
+/* Test hook: destroy an active enemy through the normal kill path. */
+void jazz_debug_kill_enemy(JazzGame *g, u8 slot)
+{
+    if ((slot < JAZZ_MAX_ENEMIES) && g->enemies[slot].active)
+        kill_enemy(g, &g->enemies[slot]);
 }
 
 void jazz_debug_hurt(JazzGame *g)

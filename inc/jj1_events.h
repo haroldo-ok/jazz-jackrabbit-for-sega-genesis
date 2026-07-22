@@ -40,7 +40,8 @@ enum {
     JJ1_CLASS_DESTRUCT,      /* behaviour 21: destructible block/sign */
     JJ1_CLASS_TUBE,          /* movement 37/38: sucker tube, horizontal push */
     JJ1_CLASS_BRIDGE,        /* movement 28: walkable bridge span */
-    JJ1_CLASS_UNBOARD        /* modifier 38: cancels airboard flight on touch */
+    JJ1_CLASS_UNBOARD,       /* modifier 38: cancels airboard flight on touch */
+    JJ1_CLASS_BOSS           /* movement 41: episode guardian boss fight */
 };
 
 /* Item modifiers mirroring the original meanings that matter here. */

@@ -41,6 +41,10 @@
  * in tools/build_sgdk_jj1_visuals.py, which refuses to emit a frame too big
  * to fit here. */
 #define JJ1_ENEMY_SLOT_TILES 48
+/* The episode guardian is 96x56 (84 tiles): it occupies two adjacent enemy
+ * slots, always the first two, so no walker's upload overlaps it. */
+#define JJ1_BOSS_SLOT_SPAN 3   /* 144 tiles: 84 body + 15 cannon */
+#define JJ1_BOSS_SLOT_TILES (JJ1_BOSS_SLOT_SPAN * JJ1_ENEMY_SLOT_TILES)
 #define JJ1_ENEMY_SLOTS JAZZ_MAX_ENEMIES
 #define T_ENEMY_WALK T_ENEMY_BASE
 #define JJ1_WALKER_FRAME_TILES 8
@@ -62,7 +66,9 @@
 #define T_BOARD      (T_ITEM_BASE + (JJ1_ITEM_SLOTS * JJ1_ITEM_SLOT_TILES))
 #define T_GEM        (T_BOARD + JJ1_BOARD_SLOT_TILES)
 #define T_BULLET     (T_GEM + 1)
-#define T_JJ1_SKY    (T_BULLET + 1)
+/* One solid tile for the guardian's energy bar. */
+#define T_BOSSBAR    (T_BULLET + 1)
+#define T_JJ1_SKY    (T_BOSSBAR + 1)
 #define T_JJ1_LEVEL0_SCREEN (T_JJ1_SKY + 8)
 #define JJ1_LEVEL0_SCREEN_TILES (40 * 28)
 /* Runtime cache: keyed by block ID, so it must hold every distinct 32x32
@@ -122,6 +128,19 @@ typedef struct {
     const Jj1EventSprite *shield;     /* orbiting shield orb */
     const Jj1EventSprite *board;      /* airboard, drawn under the rider */
     const Jj1EventSprite *boardLeft;
+    /* Guardian accessory: the cannon, drawn attached to the body at the
+     * offsets its animation record carries. */
+    const Jj1EventSprite *bossCannon;
+    const Jj1EventSprite *bossCannonLeft;
+    s16 bossCannonX, bossCannonY;
+    s16 bossCannonLeftX, bossCannonLeftY;
+    /* Charging stage: the drill body and its spike accessory. */
+    const Jj1EventSprite *bossLate;
+    const Jj1EventSprite *bossLateLeft;
+    const Jj1EventSprite *bossSpike;
+    const Jj1EventSprite *bossSpikeLeft;
+    s16 bossSpikeX, bossSpikeY;
+    s16 bossSpikeLeftX, bossSpikeLeftY;
 } Jj1StageArt;
 
 extern const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT];

@@ -310,11 +310,31 @@ static void test_end_of_level_and_episode(void)
 
     for (i = 0; i < JAZZ_STAGE_COUNT; i++) {
         u8 stage = g.stage;
-        CHECK(find_event(stage, JJ1_CLASS_END, &gx, &gy), "end sign exists");
-        place_on_ground(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) - 10);
-        jazz_debug_place(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) + 4);
-        jazz_step(&g, 0);
-        CHECK(g.events & JAZZ_EVENT_EXIT, "touching the original end sign exits");
+        if (find_event(stage, JJ1_CLASS_END, &gx, &gy)) {
+            place_on_ground(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) - 10);
+            jazz_debug_place(&g, (s16)(gx << 5) + 8, (s16)(gy << 5) + 4);
+            jazz_step(&g, 0);
+            CHECK(g.events & JAZZ_EVENT_EXIT, "touching the original end sign exits");
+        } else {
+            /* The guardian stage has no sign: defeating the boss is the exit.
+               Land the killing blows directly on its cell. */
+            int hits;
+            CHECK(find_event(stage, JJ1_CLASS_BOSS, &gx, &gy), "a boss guards the last stage");
+            jazz_debug_place(&g, (s16)((gx - 3) << 5), (s16)(gy << 5));
+            jazz_step(&g, 0);   /* activate it */
+            for (hits = 0; hits < 300 && !g.transitionTimer; hits++) {
+                int b;
+                jazz_step(&g, 0);      /* clears events, runs activation */
+                for (b = 0; b < JAZZ_MAX_ENEMIES; b++)
+                    if (g.enemies[b].active && (g.enemies[b].klass == JJ1_CLASS_BOSS)) {
+                        if (g.enemies[b].hitPoints > 1) g.enemies[b].hitPoints--;
+                        else { jazz_debug_kill_enemy(&g, (u8)b); }
+                        break;
+                    }
+                /* kill_enemy raises the exit; stop before a step clears it. */
+            }
+            CHECK(g.events & JAZZ_EVENT_EXIT, "defeating the boss exits");
+        }
         CHECK(g.transitionTimer > 0, "exit starts the stage transition");
         while (g.transitionTimer) jazz_step(&g, 0);
         if (i < JAZZ_STAGE_COUNT - 1)
@@ -546,8 +566,10 @@ static void test_all_stages_are_playable(void)
                                                   (s16)(g.player.y >> 4)),
               "the level spawns Jazz in open space");
 
-        /* Each level has its own event table: it must resolve a route out. */
-        CHECK(find_event(stage, JJ1_CLASS_END, &gx, &gy),
+        /* Each level has its own event table: it must resolve a route out -
+           either an end sign or, on the guardian stage, the boss itself. */
+        CHECK(find_event(stage, JJ1_CLASS_END, &gx, &gy) ||
+              find_event(stage, JJ1_CLASS_BOSS, &gx, &gy),
               "the level has an end sign");
 
         for (sy = 0; sy < 64; sy++)
@@ -1029,6 +1051,186 @@ static void test_bird_spread(void)
     CHECK(arcing == 2, "both bird shots arc under gravity");
 }
 
+
+/* The guardian hovers around its anchor, fires shots that can hurt the
+ * player, and drops to a charging lane at half health. */
+static void test_boss_fight(void)
+{
+    JazzGame g;
+    int gx, gy, f;
+    s16 minX = 32767, maxX = -32768, minY = 32767, maxY = -32768;
+    int bossSlot = -1, sawHostile = 0;
+
+    CHECK(find_event(7, JJ1_CLASS_BOSS, &gx, &gy), "the last stage has a guardian");
+    jazz_game_init(&g);
+    jazz_debug_set_stage(&g, 7);
+    /* A boss must wake from well outside the walkers' activation window -
+       approaching the arena from any angle counts as entering the fight. */
+    jazz_debug_place(&g, (s16)(((gx - 12) << 5)), (s16)((gy - 8) << 5));
+    {
+        int f2, b2, awake = 0;
+        for (f2 = 0; f2 < 60 && !awake; f2++) {
+            jazz_step(&g, 0);
+            for (b2 = 0; b2 < JAZZ_MAX_ENEMIES; b2++)
+                if (g.enemies[b2].active && (g.enemies[b2].klass == JJ1_CLASS_BOSS)) awake = 1;
+        }
+        CHECK(awake, "the guardian wakes from two screens away");
+    }
+    jazz_debug_place(&g, (s16)((gx - 4) << 5), (s16)((gy + 1) << 5));
+
+    for (f = 0; f < 300; f++) {
+        int b;
+        jazz_step(&g, 0);
+        for (b = 0; b < JAZZ_MAX_ENEMIES; b++)
+            if (g.enemies[b].active && (g.enemies[b].klass == JJ1_CLASS_BOSS)) {
+                bossSlot = b;
+                if (g.enemies[b].x < minX) minX = g.enemies[b].x;
+                if (g.enemies[b].x > maxX) maxX = g.enemies[b].x;
+                if (g.enemies[b].y < minY) minY = g.enemies[b].y;
+                if (g.enemies[b].y > maxY) maxY = g.enemies[b].y;
+            }
+        for (b = 0; b < JAZZ_MAX_BULLETS; b++)
+            if (g.bullets[b].active && g.bullets[b].hostile) sawHostile = 1;
+    }
+    CHECK(bossSlot >= 0, "the guardian activates");
+    {
+        /* Stage 0 is a four-part circuit: two states sweeping while facing
+           left, two facing right.  A single +-1 direction cannot express that,
+           and without it the boss never turns to face its travel. */
+        int st, visited[5] = { 0, 0, 0, 0, 0 }, allFour = 1;
+        JazzGame h;
+        int f3, b3;
+        jazz_game_init(&h);
+        jazz_debug_set_stage(&h, 7);
+        jazz_debug_place(&h, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
+        for (f3 = 0; f3 < 600; f3++) {
+            jazz_step(&h, 0);
+            for (b3 = 0; b3 < JAZZ_MAX_ENEMIES; b3++)
+                if (h.enemies[b3].active && (h.enemies[b3].klass == JJ1_CLASS_BOSS)) {
+                    s8 d = h.enemies[b3].direction;
+                    if (d >= 1 && d <= 4) visited[d]++;
+                }
+        }
+        for (st = 1; st <= 4; st++) if (!visited[st]) allFour = 0;
+        CHECK(allFour, "the guardian walks all four circuit states");
+
+        /* Past half health it must leave the circuit and charge. */
+        for (b3 = 0; b3 < JAZZ_MAX_ENEMIES; b3++)
+            if (h.enemies[b3].active && (h.enemies[b3].klass == JJ1_CLASS_BOSS))
+                h.enemies[b3].hitPoints = 1;
+        {
+            int charged = 0;
+            for (f3 = 0; f3 < 400 && !charged; f3++) {
+                jazz_step(&h, 0);
+                for (b3 = 0; b3 < JAZZ_MAX_ENEMIES; b3++)
+                    if (h.enemies[b3].active && (h.enemies[b3].klass == JJ1_CLASS_BOSS) &&
+                        (h.enemies[b3].direction >= 5)) charged = 1;
+            }
+            CHECK(charged, "the guardian charges once past half health");
+        }
+    }
+    CHECK((maxX - minX) > 100, "the guardian sweeps horizontally");
+    CHECK((maxY - minY) > 60, "the guardian sweeps vertically");
+    CHECK(sawHostile, "the guardian fires at the player");
+
+    {
+        /* A shot that is created and then dies on its very next step is
+           invisible in play.  Checking only that one was spawned missed a
+           muzzle placed inside the floor, so assert the shots actually live. */
+        JazzGame t;
+        int f6, b6, lived = 0;
+        u8 age[JAZZ_MAX_BULLETS];
+        for (b6 = 0; b6 < JAZZ_MAX_BULLETS; b6++) age[b6] = 0;
+        jazz_game_init(&t);
+        jazz_debug_set_stage(&t, 7);
+        jazz_debug_place(&t, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
+        for (f6 = 0; f6 < 600; f6++) {
+            jazz_step(&t, 0);
+            for (b6 = 0; b6 < JAZZ_MAX_BULLETS; b6++) {
+                u8 on = (u8)(t.bullets[b6].active && t.bullets[b6].hostile);
+                if (on) age[b6] = (u8)((age[b6] < 200) ? age[b6] + 1 : age[b6]);
+                else age[b6] = 0;
+                if (age[b6] > 3) lived = 1;
+            }
+        }
+        CHECK(lived, "the guardian's shots survive past their first step");
+    }
+
+    {
+        /* The guardian is drawn 96x56 but was taking hits on a walker's 14x16
+           box, so shots passed through it and its energy bar never moved. */
+        JazzGame k;
+        int f4, b4;
+        u8 before = 0, after = 0;
+        jazz_game_init(&k);
+        jazz_debug_set_stage(&k, 7);
+        jazz_debug_place(&k, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
+        for (f4 = 0; f4 < 60; f4++) jazz_step(&k, 0);
+        for (b4 = 0; b4 < JAZZ_MAX_ENEMIES; b4++)
+            if (k.enemies[b4].active && (k.enemies[b4].klass == JJ1_CLASS_BOSS))
+                before = k.enemies[b4].hitPoints;
+        for (f4 = 0; f4 < 600; f4++)
+            jazz_step(&k, ((f4 & 15) < 2) ? JAZZ_INPUT_FIRE : 0);
+        for (b4 = 0; b4 < JAZZ_MAX_ENEMIES; b4++)
+            if (k.enemies[b4].active && (k.enemies[b4].klass == JJ1_CLASS_BOSS))
+                after = k.enemies[b4].hitPoints;
+        CHECK(before > 0, "the guardian starts with hit points");
+        CHECK(after < before, "shooting the guardian reduces its energy");
+    }
+
+    {
+        /* Once drilling, the guardian bores into the floor and smashes the
+           block beneath it, exactly where the original swaps that tile. */
+        JazzGame d;
+        int f5, b5, drilled = 0;
+        u16 brokeBefore, brokeAfter;
+        jazz_game_init(&d);
+        jazz_debug_set_stage(&d, 7);
+        jazz_debug_place(&d, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
+        for (f5 = 0; f5 < 60; f5++) jazz_step(&d, 0);
+        for (b5 = 0; b5 < JAZZ_MAX_ENEMIES; b5++)
+            if (d.enemies[b5].active && (d.enemies[b5].klass == JJ1_CLASS_BOSS))
+                d.enemies[b5].hitPoints = 1;      /* force the drill stage */
+        brokeBefore = d.destroyCount;
+        for (f5 = 0; f5 < 1500; f5++) {
+            jazz_step(&d, 0);
+            for (b5 = 0; b5 < JAZZ_MAX_ENEMIES; b5++)
+                if (d.enemies[b5].active && (d.enemies[b5].klass == JJ1_CLASS_BOSS) &&
+                    (d.enemies[b5].direction == 9)) drilled = 1;
+        }
+        brokeAfter = d.destroyCount;
+        CHECK(drilled, "the guardian bores into the floor");
+        CHECK(brokeAfter > brokeBefore, "drilling breaks the blocks beneath it");
+    }
+
+    /* A hostile bullet landing on the player hurts him. */
+    {
+        u8 healthBefore;
+        int b = -1, i;
+        for (i = 0; i < JAZZ_MAX_BULLETS; i++)
+            if (!g.bullets[i].active) { b = i; break; }
+        CHECK(b >= 0, "a bullet slot is free");
+        if (b >= 0) {
+            g.invulnerability = 0;
+            g.player.invincibleTime = 0;
+            g.player.shield = 0;
+            healthBefore = g.health;
+            g.bullets[b].active = 1;
+            g.bullets[b].hostile = 1;
+            g.bullets[b].x = (s16)(g.player.x - 4);
+            g.bullets[b].y = (s16)(g.player.y + 8);
+            g.bullets[b].vx = 256;
+            g.bullets[b].vy = 0;
+            g.bullets[b].subX = 0;
+            g.bullets[b].subY = 0;
+            g.bullets[b].gravity = 0;
+            g.bullets[b].behaviour = 0;
+            jazz_step(&g, 0);
+            CHECK(g.health < healthBefore, "a guardian shot hurts the player");
+        }
+    }
+}
+
 int main(void)
 {
     test_level_geometry();
@@ -1057,6 +1259,7 @@ int main(void)
     test_airboard();
     test_unboard_and_shot_end();
     test_bird_spread();
+    test_boss_fight();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return EXIT_FAILURE;
