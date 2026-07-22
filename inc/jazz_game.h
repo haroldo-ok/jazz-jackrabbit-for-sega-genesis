@@ -30,6 +30,9 @@ typedef int32_t s32;
 #define JAZZ_MAP_W 96
 #define JAZZ_MAP_H 15
 #define JAZZ_MAX_ENEMIES 6   /* one 48-tile VRAM sprite slot each */
+/* The episode guardian's art spans two adjacent slots, always the first two,
+ * so ordinary enemies must start allocating past them on a boss stage. */
+#define JJ1_BOSS_SLOT_SPAN 3
 #define JAZZ_MAX_DESTRUCT_HITS 6
 /* Collision body of an enemy, shared by the core and the renderer. */
 #define JAZZ_ENEMY_W 14
@@ -150,7 +153,8 @@ typedef struct {
     u8 klass;          /* JJ1_CLASS_ENEMY_WALK / _FLY / JJ1_CLASS_HAZARD */
     u8 gridX, gridY;   /* originating event cell */
     u8 hitPoints;
-    u8 phase;          /* flyer bob phase */
+    u8 phase;          /* flyer bob phase, or the guardian's circuit angle */
+    u8 bossFacing;     /* guardian only: 1 while it sweeps left */
 } JazzEnemy;
 
 typedef struct {
@@ -159,6 +163,7 @@ typedef struct {
     s16 subX, subY;    /* 8.8 subpixel accumulators */
     s8 gravity;        /* 8.8 accel per frame; bouncer/spread arc */
     u8 behaviour;      /* 0 straight, 4 bouncer (reflects off surfaces) */
+    u8 hostile;        /* fired by the boss: hits the player, not enemies */
     u8 active;
 } JazzBullet;
 
@@ -195,6 +200,8 @@ typedef struct {
     u16 destroyCount;
     u8 destroyedX, destroyedY;
     u16 enemyScanColumn;
+    u8 bossGridX, bossGridY; /* the stage's guardian cell, found at load */
+    u8 bossPresent;          /* stage has a guardian */
 #endif
     u16 previousInput;
     u16 frame;
@@ -224,6 +231,7 @@ void jazz_debug_place(JazzGame *game, s16 x, s16 y);
 /* Rebuild the game on a given stage (tests only). */
 void jazz_debug_set_stage(JazzGame *game, u8 stage);
 void jazz_debug_hurt(JazzGame *game);
+void jazz_debug_kill_enemy(JazzGame *game, u8 slot);
 void jazz_debug_shoot_cell(JazzGame *game, s16 x, s16 y);
 /* Y coordinate of the player's feet, i.e. the bottom of the collision body. */
 s16 jazz_player_feet(const JazzGame *game);

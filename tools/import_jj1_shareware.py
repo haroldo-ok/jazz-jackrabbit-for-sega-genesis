@@ -272,12 +272,26 @@ def decode_anims(anims: bytes) -> list[dict]:
     return out
 
 
+def decode_sprite_offsets(sprite_path: Path) -> list[tuple[int, int]]:
+    """Per-sprite draw anchors, which the engine adds on top of the animation's
+    own per-frame offsets.  The table is `count` x-bytes (scaled by four) then
+    `count` y-bytes.  Ignoring it is why an accessory pinned to a body sprite
+    can sit correctly for one facing and adrift for the other: the left and
+    right sprites carry different anchors."""
+    r = Reader(sprite_path.read_bytes())
+    count = r.u16()
+    if count > 512:
+        raise DecodeError(f"invalid sprite count: {count}")
+    raw = r.block(count * 2)
+    return [(raw[i] * 4, raw[count + i]) for i in range(count)]
+
+
 def decode_mainchar(main_path: Path, sprite_path: Path) -> list[Optional[tuple[int, int, bytes]]]:
     spec = Reader(sprite_path.read_bytes())
     count = spec.u16()
     if count > 256:
         raise DecodeError(f"invalid sprite count: {count}")
-    spec.skip(count * 2)  # sprite anchor offsets; images remain sequential
+    spec.skip(count * 2)  # sprite anchor offsets; see decode_sprite_offsets
     main = Reader(main_path.read_bytes(), 2)
     result: list[Optional[tuple[int, int, bytes]]] = []
     for _ in range(count):

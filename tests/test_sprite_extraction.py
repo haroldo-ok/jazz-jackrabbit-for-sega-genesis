@@ -123,5 +123,30 @@ def main() -> int:
     return 0
 
 
+def test_guardian_uses_its_own_sprite_bank():
+    """The guardian stage borrows Medivo's tiles but ships its own sprites.
+
+    LEVEL0.018 declares blocks_extension 002 while its world is 18, so deriving
+    the sprite file from the tile extension loads SPRITES.002 and the boss
+    resolves to whatever small enemies happen to sit at those indices.  The
+    real frames are six uniform 96x55 cells in SPRITES.018.
+    """
+    from import_jj1_shareware import decode_mainchar, parse_level
+    from pathlib import Path
+    root = Path("/home/claude/jj1")
+    meta = parse_level(root / "LEVEL0.018")[1]
+    assert meta["blocks_extension"] == "002", meta["blocks_extension"]
+    assert meta["world"] == 18, meta["world"]
+
+    own = decode_mainchar(root / "MAINCHAR.000", root / "SPRITES.018")
+    tiles = decode_mainchar(root / "MAINCHAR.000", root / "SPRITES.002")
+    guardian = [own[i][:2] for i in range(25, 31)]
+    assert all(size == (96, 55) for size in guardian), guardian
+    wrong = [tiles[i][:2] for i in range(25, 31)]
+    assert wrong != guardian, "the two banks must differ at the guardian indices"
+    print("PASS: the guardian resolves through its own sprite bank")
+
+
 if __name__ == "__main__":
+    test_guardian_uses_its_own_sprite_bank()
     sys.exit(main())

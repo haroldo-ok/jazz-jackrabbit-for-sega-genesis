@@ -28,6 +28,7 @@ static u16 renderedDestroyCount;
 static u16 enemySlotArt[JAZZ_MAX_ENEMIES];
 static u16 playerSlotFrame;
 static u16 boardSlotKey;
+static u16 bossGunArt;
 static u16 lastInput;
 static u8 selectedStage;   /* level select on the title screen */
 static u16 titlePreviousPad;
@@ -303,6 +304,7 @@ static void render_backdrop(u8 stage)
     /* Force the streamed slots to refill against the new art. */
     playerSlotFrame = 0xFFFF;
     boardSlotKey = 0xFFFF;
+    bossGunArt = 0xFFFF;
     for (u8 i = 0; i < JAZZ_MAX_ENEMIES; i++) enemySlotArt[i] = 0xFFFF;
 
     render_jj1_sky();
@@ -326,6 +328,14 @@ static void load_video_assets(void)
     VDP_loadTileData(jazz_enemy_flyer_tiles, T_ENEMY_FLY, 2 * JJ1_FLYER_FRAME_TILES, DMA);
     VDP_loadTileData(jazz_enemy_hazard_tiles, T_ENEMY_HAZARD, 4, DMA);
     VDP_loadTileData(jazz_gem_tile, T_GEM, 1, DMA);
+    {
+        /* A solid tile for the guardian's energy bar. */
+        static const u32 solid[8] = {
+            0x33333333, 0x33333333, 0x33333333, 0x33333333,
+            0x33333333, 0x33333333, 0x33333333, 0x33333333
+        };
+        VDP_loadTileData(solid, T_BOSSBAR, 1, DMA);
+    }
     VDP_loadTileData(jazz_bullet_tile, T_BULLET, 1, DMA);
     VDP_loadTileData(jj1_sky_tiles, T_JJ1_SKY, 8, DMA);
     PAL_setPalette(PAL0, jazz_pal0, DMA);
@@ -392,6 +402,30 @@ static u8 itemSlotEvent[JJ1_ITEM_SLOTS];
  * grid within the visible 11x8 block window; the taken bitmap hides
  * collected cells.  Items use their real extracted sprite, streamed into a
  * small pool keyed by event id so a run of identical pickups shares one slot. */
+/* The guardian's energy bar.  The original draws a vertical column near the
+ * right edge whose height falls from 100 px to nothing as hits accumulate, so
+ * the fight has visible progress. */
+static void draw_boss_energy(u16 *count, const JazzEnemy *e)
+{
+    const Jj1EventInfo *bi =
+        jj1_event_info(game.stage, jj1_runtime_event(game.stage, e->gridX, e->gridY));
+    u8 total = bi->strength ? bi->strength : 1;
+    u8 spent = (u8)((total > e->hitPoints) ? (total - e->hitPoints) : 0);
+    s16 lost = (s16)(((s16)spent * 100) / total);   /* percent gone */
+    s16 top = (s16)(40 + lost);                      /* bar shrinks downward */
+    s16 barX = 320 - 40;
+    s16 y = top;
+    /* Only one solid tile is reserved here, so the column is built from 1x1
+       sprites.  Asking for a taller or wider sprite makes the VDP fetch the
+       tiles that follow this one - the sky - and the bar renders as garbage
+       that never visibly changes. */
+    while (y < 140) {
+        put_sprite(count, barX, y, SPRITE_SIZE(1, 1),
+                   TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_BOSSBAR));
+        y = (s16)(y + 8);
+    }
+}
+
 static void render_jj1_events(u16 *count)
 {
     s16 sx, sy;
@@ -632,12 +666,25 @@ static void render_sprites(void)
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++)
         if (game.enemies[i].active) {
             const JazzEnemy *e = &game.enemies[i];
-            u8 facingLeft = (e->direction < 0);
+            /* The guardian's facing comes from its circuit state (1 and 2
+               sweep left, 3 and 4 right); ordinary enemies use the sign. */
+            u8 facingLeft = (e->klass == JJ1_CLASS_BOSS) ? e->bossFacing
+                                                         : (e->direction < 0);
             /* Runtime check, not #ifdef: the generated include is compiled
                into gfx.c, so this translation unit never sees its macro.  gfx.c
                exports a null pointer when no original sprites were extracted. */
             u8 id = jj1_runtime_event(game.stage, e->gridX, e->gridY);
             const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
+            u8 bossCharging = 0;
+            if (e->klass == JJ1_CLASS_BOSS) {
+                /* Past half health the guardian becomes the drill, body and
+                   accessory both. */
+                const Jj1EventInfo *bi = jj1_event_info(game.stage, id);
+                u8 total = bi->strength ? bi->strength : 2;
+                bossCharging = (u8)((total - e->hitPoints) >= (total >> 1));
+                if (bossCharging && stageArt->bossLate && stageArt->bossLate->frames)
+                    art = facingLeft ? stageArt->bossLateLeft : stageArt->bossLate;
+            }
             if (art && art->frames) {
                 /* One VRAM slot per active enemy: upload the current frame only
                    when it changes, so a walking enemy costs one DMA every few
@@ -673,6 +720,53 @@ static void render_sprites(void)
                                    TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tile));
                         tile = (u16)(tile + (cw * ch));
                     }
+                }
+                /* The guardian carries an accessory - the cannon while it
+                   circles, the drill spike once it charges - positioned from
+                   the body sprite's own top-left corner, which is where the
+                   emitted delta is measured from.  Anchoring it to the
+                   collision origin instead is what left the gun adrift. */
+                if (e->klass == JJ1_CLASS_BOSS) {
+                    const Jj1EventSprite *gun = bossCharging
+                        ? (facingLeft ? stageArt->bossSpikeLeft : stageArt->bossSpike)
+                        : (facingLeft ? stageArt->bossCannonLeft : stageArt->bossCannon);
+                    s16 gx = bossCharging
+                        ? (facingLeft ? stageArt->bossSpikeLeftX : stageArt->bossSpikeX)
+                        : (facingLeft ? stageArt->bossCannonLeftX : stageArt->bossCannonX);
+                    s16 gy = bossCharging
+                        ? (facingLeft ? stageArt->bossSpikeLeftY : stageArt->bossSpikeY)
+                        : (facingLeft ? stageArt->bossCannonLeftY : stageArt->bossCannonY);
+                    if (gun && gun->frames) {
+                        u16 gunTiles = (u16)(gun->tilesW * gun->tilesH);
+                        u16 gunSlot = (u16)(slot + (art->tilesW * art->tilesH));
+                        u8 gframe = (u8)((game.frame >> 3) % gun->frames);
+                        u16 gwant = (u16)(0x4000 | (gun->tile << 2) | gframe);
+                        s16 cellX = e->x - cameraX + (JAZZ_ENEMY_W >> 1) - (s16)(cellW >> 1);
+                        s16 cellY = e->y - cameraY + JAZZ_ENEMY_H - (s16)cellH;
+                        if (bossGunArt != gwant) {
+                            VDP_loadTileData(stageArt->spriteTiles +
+                                ((u32)(gun->tile + (gframe * gunTiles)) * 8),
+                                gunSlot, gunTiles, DMA);
+                            bossGunArt = gwant;
+                        }
+                        {
+                            u16 gt = gunSlot;
+                            u8 kx, ky;
+                            for (ky = 0; ky < gun->tilesH; ky += 4) {
+                                u8 kh = (u8)((gun->tilesH - ky > 4) ? 4 : (gun->tilesH - ky));
+                                for (kx = 0; kx < gun->tilesW; kx += 4) {
+                                    u8 kw = (u8)((gun->tilesW - kx > 4) ? 4 : (gun->tilesW - kx));
+                                    put_sprite(&count,
+                                        cellX + gx + (s16)(kx << 3),
+                                        cellY + gy + (s16)(ky << 3),
+                                        SPRITE_SIZE(kw, kh),
+                                        TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, gt));
+                                    gt = (u16)(gt + (kw * kh));
+                                }
+                            }
+                        }
+                    }
+                    draw_boss_energy(&count, e);
                 }
                 continue;
             }
@@ -734,6 +828,7 @@ static void begin_play(void)
     for (u8 s = 0; s < JAZZ_MAX_ENEMIES; s++) enemySlotArt[s] = 0xFFFF;
     playerSlotFrame = 0xFFFF;
     boardSlotKey = 0xFFFF;
+    bossGunArt = 0xFFFF;
     mode = MODE_PLAY;
 }
 
@@ -823,6 +918,21 @@ static u8 run_target_point_to_point_tests(void)
     startX = probe->player.x;
     { u8 i; for (i = 0; i < 4; i++) jazz_step(probe, JAZZ_INPUT_RIGHT); }
     if (probe->player.x <= startX) return 0;
+
+    /* The guardian must activate when the player stands in its arena. */
+    jazz_game_init(probe);
+    jazz_debug_set_stage(probe, 7);
+    jazz_debug_place(probe, (s16)((12 - 5) << 5), (s16)((12 + 1) << 5));
+    {
+        u8 f, b, seen = 0;
+        for (f = 0; f < 180 && !seen; f++) {
+            jazz_step(probe, 0);
+            for (b = 0; b < JAZZ_MAX_ENEMIES; b++)
+                if (probe->enemies[b].active &&
+                    (probe->enemies[b].klass == JJ1_CLASS_BOSS)) seen = 1;
+        }
+        if (!seen) return 0;
+    }
     return 1;
 }
 #endif

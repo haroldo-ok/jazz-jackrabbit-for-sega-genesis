@@ -101,9 +101,10 @@ def runtime_records(level_path: Path):
     # so rather than model that block we scan for the run of 11 bytes whose
     # LA_UNKNOWN9 entry is 31 - the value JJ1Level::load itself expects there.
     level_anims = [0] * 11
+    bullets = bytes(32 * 20)
     try:
         r.skip(4)                      # JJ1MANIMS misc animation bytes
-        r.rle(32 * 20)                 # bullet definitions
+        bullets = r.rle(32 * 20)       # bullet definitions
         r.skip_rle()                   # bullet names
         tail = r.data[r.pos:r.pos + 4096]
         for off in range(len(tail) - 11):
@@ -114,13 +115,14 @@ def runtime_records(level_path: Path):
     except Exception:
         pass                           # leave zeros: the caller falls back
 
-    return grid, masks, eventset, start_x, start_y, anims, player_anims, level_anims
+    return (grid, masks, eventset, start_x, start_y, anims, player_anims,
+            level_anims, bullets)
 
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
 CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
     CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE, \
-    CLASS_BRIDGE, CLASS_UNBOARD = range(12)
+    CLASS_BRIDGE, CLASS_UNBOARD, CLASS_BOSS = range(13)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO, \
     ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP, ITEM_BIRD, ITEM_AIRBOARD = range(10)
 
@@ -143,6 +145,12 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
     # JJ1Bridge for movement 28.  They carry modifier 7 ("harmless on touch"),
     # so the modifier-7 rule below used to swallow them and the whole span
     # vanished - invisible and not walkable.  Classify them first.
+    # The episode guardian (movement 41) is the boss fight.  It carries
+    # modifier 8, which would otherwise classify as an end trigger, so it has
+    # to be recognised by behaviour first; strength is its hit points.
+    if movement == 41:
+        return CLASS_BOSS, 0, min(points * 10 // 25, 255), min(strength, 255)
+
     if movement == 28:
         # JJ1Bridge spans multiA pieces spaced pieceSize*4 px apart, with the
         # deck multiB px below the cell top.  Drawing only the event's own cell
@@ -296,7 +304,7 @@ def main() -> None:
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims, _lanims = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims, _lanims, _bul = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])
