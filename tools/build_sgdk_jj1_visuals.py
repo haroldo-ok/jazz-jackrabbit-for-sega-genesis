@@ -207,7 +207,7 @@ def main() -> None:
     # SPRITES.<world> yields a mostly-empty bank.
     sprites = decode_mainchar(args.input / "MAINCHAR.000", sprite_file)
     bank = sprites
-    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims, level_anims, bullet_defs = runtime_records(args.input / args.level)
+    _grid, _masks, eventset, _sx, _sy, anim_bytes, player_anims, level_anims, bullet_defs, _nl, _nw = runtime_records(args.input / args.level)
     anims = decode_anims(anim_bytes)
     # The first eight MAINCHAR records are consecutive original Jazz walk
     # frames in the Episode 1 shareware data. Keep all of them resident so the

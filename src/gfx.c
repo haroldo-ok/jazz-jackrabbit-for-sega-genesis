@@ -4,31 +4,10 @@
 /* Generated from the user-supplied JJ1 shareware installation by
  * tools/build_sgdk_jj1_visuals.py. It contains 4bpp Genesis-ready versions
  * of original terrain/detail pixels and Jazz's first animation frame. */
-/* World tile banks: shared by every level in the world. */
-#include "jj1_world000_tiles.inc"
-#include "jj1_world001_tiles.inc"
-#include "jj1_world002_tiles.inc"
+/* Level art and world tile banks for the episode this ROM was built for. */
+#include "jj1_episode_includes.inc"
 
-/* Per-level maps, event grids, masks, sprites and palettes. */
-#include "jj1_level0_data.inc"
-#include "jj1_level1_data.inc"
-#include "jj1_level2_data.inc"
-#include "jj1_level3_data.inc"
-#include "jj1_level4_data.inc"
-#include "jj1_level5_data.inc"
-#include "jj1_level6_data.inc"
-#include "jj1_level7_data.inc"
-#include "jj1_level0_visuals.inc"
-#include "jj1_level1_visuals.inc"
-#include "jj1_level2_visuals.inc"
-#include "jj1_level3_visuals.inc"
-#include "jj1_level4_visuals.inc"
-#include "jj1_level5_visuals.inc"
-#include "jj1_level6_visuals.inc"
-#include "jj1_level7_visuals.inc"
-
-/* Stage order: Diamondus 1-3, then world 1, world 2, and the secret level
- * (which reuses the world 2 tile bank). */
+/* One entry per stage, in the order the episode's level chain runs. */
 #define STAGE(n, world) { \
     jj1_world##world##_block_tiles, jj1_world##world##_palette, jj1_level##n##_blocks, \
     jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_player_states, \
@@ -46,9 +25,7 @@
     jj1_level##n##_boss_spike_left_x, jj1_level##n##_boss_spike_left_y }
 
 const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT] = {
-    STAGE(0, 000), STAGE(1, 000), STAGE(2, 000),
-    STAGE(3, 001), STAGE(4, 001),
-    STAGE(5, 002), STAGE(6, 002), STAGE(7, 002),
+#include "jj1_episode_stages.inc"
 };
 
 /* Original event sprites, when the importer has resolved them from the game

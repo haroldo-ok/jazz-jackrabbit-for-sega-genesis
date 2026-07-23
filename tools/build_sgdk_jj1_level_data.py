@@ -86,7 +86,8 @@ def runtime_records(level_path: Path):
     start_y = r.u16() + 1
     # After the start coordinates: JJ1Level::load reads a couple of bytes,
     # jump height, water level, anim speed, then the player animation set.
-    r.skip(2)                   # l, w bytes
+    next_level = r.byte()       # l: next level number
+    next_world = r.byte()       # w: next world number
     r.skip(2)                   # jump height (short)
     r.skip(2)                   # padding seek(2)
     r.skip(2)                   # water level target (short)
@@ -116,7 +117,7 @@ def runtime_records(level_path: Path):
         pass                           # leave zeros: the caller falls back
 
     return (grid, masks, eventset, start_x, start_y, anims, player_anims,
-            level_anims, bullets)
+            level_anims, bullets, next_level, next_world)
 
 
 # Genesis runtime classes (keep in sync with inc/jj1_events.h).
@@ -304,7 +305,7 @@ def main() -> None:
     args = ap.parse_args()
 
     grid, metadata = parse_level(args.input / args.level)
-    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims, _lanims, _bul = runtime_records(args.input / args.level)
+    runtime_grid, masks, eventset, start_x, start_y, _anims, _panims, _lanims, _bul, _nl, _nw = runtime_records(args.input / args.level)
     if grid != runtime_grid:
         raise SystemExit("grid decode mismatch")
     ext = str(metadata["blocks_extension"])

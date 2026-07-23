@@ -4,16 +4,9 @@
  * Each generated include defines jj1_levelN_eventset[64] built from the
  * original level records, replacing the provisional tables below. */
 #if defined(__has_include)
-#if __has_include("jj1_level0_eventset.inc")
+#if __has_include("jj1_episode_eventsets.inc")
 #define JJ1_HAVE_GENERATED_EVENTSETS 1
-#include "jj1_level0_eventset.inc"
-#include "jj1_level1_eventset.inc"
-#include "jj1_level2_eventset.inc"
-#include "jj1_level3_eventset.inc"
-#include "jj1_level4_eventset.inc"
-#include "jj1_level5_eventset.inc"
-#include "jj1_level6_eventset.inc"
-#include "jj1_level7_eventset.inc"
+#include "jj1_episode_eventsets.inc"
 #endif
 #endif
 
@@ -141,9 +134,7 @@ const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
    Falling back to another level's table (as the three-stage version did for
    anything past stage 2) misclassifies every event in that level. */
 static const Jj1EventInfo *const jj1_eventsets[JAZZ_STAGE_COUNT] = {
-    jj1_level0_eventset, jj1_level1_eventset, jj1_level2_eventset,
-    jj1_level3_eventset, jj1_level4_eventset, jj1_level5_eventset,
-    jj1_level6_eventset, jj1_level7_eventset,
+#include "jj1_episode_eventset_table.inc"
 };
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
