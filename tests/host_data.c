@@ -9,12 +9,8 @@
     ((u16)((((b) & 7) << 10) | (((g) & 7) << 6) | (((r) & 7) << 2)))
 #endif
 
-#include "jj1_level0_data.inc"
-#include "jj1_level1_data.inc"
-#include "jj1_level2_data.inc"
-#include "jj1_level3_data.inc"
-#include "jj1_level4_data.inc"
-#include "jj1_level5_data.inc"
-#include "jj1_level6_data.inc"
-#include "jj1_level7_data.inc"
+/* The level set belongs to whichever episode the tree was generated for, so
+   take it from the same manifest the ROM build uses rather than listing a
+   fixed eight here. */
+#include "jj1_episode_data.inc"
 

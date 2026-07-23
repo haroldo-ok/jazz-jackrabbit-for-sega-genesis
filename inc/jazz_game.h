@@ -39,7 +39,9 @@ typedef int32_t s32;
 #define JAZZ_ENEMY_H 16
 #define JAZZ_MAX_GEMS 24
 #define JAZZ_MAX_BULLETS 6   /* room for the missile's up+down pair per shot */
-#define JAZZ_STAGE_COUNT 8   /* all eight shareware levels */
+/* Stage count comes from the episode the ROM was generated for. */
+#include "jj1_episode.h"
+#define JAZZ_STAGE_COUNT JJ1_EPISODE_STAGES
 
 /* Powerup durations, in frames (the original counts milliseconds; these are
  * the equivalent at 60Hz, capped to fit a byte counter). */

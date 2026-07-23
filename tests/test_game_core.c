@@ -278,7 +278,9 @@ static void test_springs(void)
         { 0,  95, 22, 224, "L0 spring (95,22) clears its 224px ledge" },
         { 1,  24, 37, 192, "L1 spring (24,37) clears its 192px ledge" },
         { 1, 165, 46, 192, "L1 spring (165,46) clears its 192px ledge" },
-        { 2,   1, 47,  96, "L2 spring (1,47) clears its 96px ledge" },
+        /* This case measured a spring on the episode's secret level, which is
+           not part of the level chain the build now follows, so its stage index
+           no longer refers to that level. */
     };
     size_t c;
 
@@ -1054,6 +1056,18 @@ static void test_bird_spread(void)
 
 /* The guardian hovers around its anchor, fires shots that can hurt the
  * player, and drops to a charging lane at half health. */
+
+/* Which stage holds the episode's guardian?  Hardcoding an index breaks as
+ * soon as the level set changes, so look for the event itself. */
+static u8 boss_stage(void)
+{
+    u8 st;
+    int gx, gy;
+    for (st = 0; st < JAZZ_STAGE_COUNT; st++)
+        if (find_event(st, JJ1_CLASS_BOSS, &gx, &gy)) return st;
+    return (u8)(JAZZ_STAGE_COUNT - 1);
+}
+
 static void test_boss_fight(void)
 {
     JazzGame g;
@@ -1061,9 +1075,10 @@ static void test_boss_fight(void)
     s16 minX = 32767, maxX = -32768, minY = 32767, maxY = -32768;
     int bossSlot = -1, sawHostile = 0;
 
-    CHECK(find_event(7, JJ1_CLASS_BOSS, &gx, &gy), "the last stage has a guardian");
+    CHECK(find_event(boss_stage(), JJ1_CLASS_BOSS, &gx, &gy),
+          "the episode has a guardian stage");
     jazz_game_init(&g);
-    jazz_debug_set_stage(&g, 7);
+    jazz_debug_set_stage(&g, boss_stage());
     /* A boss must wake from well outside the walkers' activation window -
        approaching the arena from any angle counts as entering the fight. */
     jazz_debug_place(&g, (s16)(((gx - 12) << 5)), (s16)((gy - 8) << 5));
@@ -1101,7 +1116,7 @@ static void test_boss_fight(void)
         JazzGame h;
         int f3, b3;
         jazz_game_init(&h);
-        jazz_debug_set_stage(&h, 7);
+        jazz_debug_set_stage(&h, boss_stage());
         jazz_debug_place(&h, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
         for (f3 = 0; f3 < 600; f3++) {
             jazz_step(&h, 0);
@@ -1142,7 +1157,7 @@ static void test_boss_fight(void)
         u8 age[JAZZ_MAX_BULLETS];
         for (b6 = 0; b6 < JAZZ_MAX_BULLETS; b6++) age[b6] = 0;
         jazz_game_init(&t);
-        jazz_debug_set_stage(&t, 7);
+        jazz_debug_set_stage(&t, boss_stage());
         jazz_debug_place(&t, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
         for (f6 = 0; f6 < 600; f6++) {
             jazz_step(&t, 0);
@@ -1163,7 +1178,7 @@ static void test_boss_fight(void)
         int f4, b4;
         u8 before = 0, after = 0;
         jazz_game_init(&k);
-        jazz_debug_set_stage(&k, 7);
+        jazz_debug_set_stage(&k, boss_stage());
         jazz_debug_place(&k, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
         for (f4 = 0; f4 < 60; f4++) jazz_step(&k, 0);
         for (b4 = 0; b4 < JAZZ_MAX_ENEMIES; b4++)
@@ -1185,7 +1200,7 @@ static void test_boss_fight(void)
         int f5, b5, drilled = 0;
         u16 brokeBefore, brokeAfter;
         jazz_game_init(&d);
-        jazz_debug_set_stage(&d, 7);
+        jazz_debug_set_stage(&d, boss_stage());
         jazz_debug_place(&d, (s16)((gx - 5) << 5), (s16)((gy + 1) << 5));
         for (f5 = 0; f5 < 60; f5++) jazz_step(&d, 0);
         for (b5 = 0; b5 < JAZZ_MAX_ENEMIES; b5++)
