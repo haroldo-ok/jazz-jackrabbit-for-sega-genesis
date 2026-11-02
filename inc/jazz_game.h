@@ -119,7 +119,8 @@ enum {
     JAZZ_EVENT_EXIT  = 16,
     JAZZ_EVENT_KILL  = 32,
     JAZZ_EVENT_HEALTH = 64,
-    JAZZ_EVENT_LIFE   = 128
+    JAZZ_EVENT_LIFE   = 128,
+    JAZZ_EVENT_SPRING = 256
 };
 
 typedef struct {
@@ -218,7 +219,9 @@ typedef struct {
     u8 paused;
     u8 transitionTimer;
     u8 finished;
-    u8 events;
+    u8 bonusGem;       /* bonus diamond collected this level */
+    u8 bonusPending;   /* set for one step when a level ends holding the diamond */
+    u16 events;
 } JazzGame;
 
 void jazz_game_init(JazzGame *game);

@@ -133,7 +133,11 @@ def test_guardian_uses_its_own_sprite_bank():
     """
     from import_jj1_shareware import decode_mainchar, parse_level
     from pathlib import Path
-    root = Path("/home/claude/jj1")
+    import os
+    root = Path(os.environ.get("JJ1_DATA", "/home/claude/jj1"))
+    if not (root / "LEVEL0.018").exists():
+        print("SKIP: guardian bank test needs JJ1_DATA=<shareware install dir>")
+        return
     meta = parse_level(root / "LEVEL0.018")[1]
     assert meta["blocks_extension"] == "002", meta["blocks_extension"]
     assert meta["world"] == 18, meta["world"]

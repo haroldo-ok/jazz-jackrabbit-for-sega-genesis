@@ -125,7 +125,7 @@ CLASS_NONE, CLASS_ITEM, CLASS_ENEMY_WALK, CLASS_ENEMY_FLY, CLASS_HAZARD, \
     CLASS_SPRING, CLASS_ONEWAY, CLASS_END, CLASS_DESTRUCT, CLASS_TUBE, \
     CLASS_BRIDGE, CLASS_UNBOARD, CLASS_BOSS = range(13)
 ITEM_SCORE, ITEM_HEALTH, ITEM_LIFE, ITEM_FASTFEET, ITEM_AMMO, \
-    ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP, ITEM_BIRD, ITEM_AIRBOARD = range(10)
+    ITEM_INVINCIBLE, ITEM_SHIELD, ITEM_HIGHJUMP, ITEM_BIRD, ITEM_AIRBOARD, ITEM_DIAMOND = range(11)
 
 
 def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int, int]:
@@ -229,7 +229,7 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         36: ITEM_SHIELD,     # 4-hit shield
         34: ITEM_BIRD,       # bird companion
         35: ITEM_AIRBOARD,   # airboard
-        37: ITEM_SCORE,      # diamond
+        37: ITEM_DIAMOND,    # bonus diamond: entering the bonus level at the exit
     }.get(modifier)
     if item is not None:
         hits = min(strength, 255)        # 0 = grab on touch, else shoot open

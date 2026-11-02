@@ -1,3 +1,27 @@
+# Test report — 2026-11-01 (bonus levels)
+
+- **Stage select is always on** (`cheatUnlocked = 1`); the emulator suite now asserts the picker is visible at boot and that UP changes the stage.
+- **Bonus music.** The bonus levels play their own track (`res/music/bonus.vgm`, registered as `jj1_music_bonus`). It is the converter's FM-only version of the bonus theme (`vgms_fm/bonus.vgm` from your S3M-to-VGM tool, the same folder the rest of the ROM's soundtrack came from), not a conversion of `BONUS.PSM` itself. Covered by emulator step 9 (audio energy inside the bonus level).
+
+**Fix: unreadable text.** The converted font kept the original's dithered 16-shade ramp, which turns to noise at 8x8, and had a transparent background, so the status bar was white-on-pale-sky. Glyphs are now solid white on an opaque dark backdrop, narrow letters are centred in the cell, and `tools/build_sgdk_font.py` produces it. Text checks in the emulator suite (title, HUD, cheat line, bonus HUD) were updated to the new colours.
+
+**Fix: bonus items were invisible.** Two causes. (1) `draw_items` passed the tile coordinates to `bonus_event` as (y, x) instead of (x, y), so items were only found by coincidence. (2) The sky was one flat blue, the same blue as the gem graphics, and the converter ignored the original's colour key (pixel value 0 is transparent), leaving an opaque black box around each item. The sky is now the original gradient (palette entries 128-171) on its own palette line, and value 0 is transparent. Covered by emulator step 8 (a test build starts one tile in front of a gem and asserts it is visible with no black box). Checked by eye: gem, hourglass, glove and exit sign.
+
+- **Bonus levels (3)** are in the ROM: the original perspective floor, tilemaps, event maps, collision masks, timers and gem counts from `BONUSMAP.000-002`, `BONUSY.000` and `BONUS.000`, converted by `tools/build_sgdk_bonus.py`. The simulation (`src/bonus_core.c`) is a port of OpenJazz's bonus player and rules and is host-tested against the real data: movement, turning, jumping, gem and clock pickups, exit, timeout, and a win by collecting every required gem on all three levels.
+- Reaching them: collect the bonus diamond in a stage and finish it (the bonus level of that world follows; winning gives an extra life), or use the stage-select cheat, whose list continues with BONUS 1-3.
+- Rendering: the floor is sampled at 80x20 (4x4-pixel blocks) into a RAM tile buffer and DMA'd each frame; items (hourglass, gem, glove, exit sign) are the original graphics pre-scaled to four sprite sizes; the player is drawn as a plain ball with a shadow. Measured in the emulator at about 7 fps for the floor; game time stays correct because the simulation catches up in 16 ms steps.
+- Not converted: the bonus music (`BONUS.PSM`) - the menu track plays instead; the original palette-rotation effects on the track edges.
+- New tests: `tests/test_bonus.c`, `tests/test_bonus_link.c` (diamond -> bonus hand-off), emulator step 7 (bonus level renders and moves).
+
+# Test report — 2026-11-01 (SGDK 2.x migration, stage-select cheat, full SFX set)
+
+- Migrated the build to SGDK 2.x (`makefile.gen`, `src/rom_header.c`, header ROM end 0x17FFFF); `rom_sanity.py` passes.
+- Added the stage-select cheat (pad code on the title screen). Verified headless: picker hidden before the code, shown after, and UP changes the stage (`tests/run_headless_emulator_test.sh`, step 6).
+- Sound: added the original BOOM, OW, 1UP, YEAHOO, FIRE1, PHOTON clips from `SOUNDS.000`; hurt, kill, life, health, exit and per-weapon fire now trigger their own effects over the music.
+- Font: the game's own `FONT2.0FN` is converted (`tools/build_sgdk_font.py`) and used for all text. Spring launches play the original spring clip.
+- Sound: shield and bird pickups and the special weapon now play their original clips (INVULN11, BIRDY1, ROCKET2).
+- Suites: host tests PASS, on-target self-test PASS, scripted playthrough PASS, music audio PASS, cheat PASS.
+
 # Test report — 2026-07-12 (event/physics update)
 
 ## Release artifact
