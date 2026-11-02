@@ -1,15 +1,16 @@
 # Jazz Jackrabbit — Genesis / Mega Drive SGDK port (work in progress)
 
-An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a bootable `JazzJackrabbitGenesis.bin` ROM that plays the three converted shareware Diamondus levels with the original maps, collision masks, event grids, start positions, and a physics model matched to the original game (via the GPL OpenJazz reference engine).
+An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a bootable `JazzJackrabbitGenesis.bin` ROM with seven converted episode stages across Diamondus, Tubelectric and Medivo, using original maps, collision masks, event grids and start positions. It remains a work in progress; see `PORTING_STATUS.md`.
 
-> **Current scope / legal status:** the repository ships with a **locally converted JJ1 pack** derived from a user-supplied shareware installation: `MAINCHAR.000` Jazz animation frames, `BLOCKS.000` terrain patterns, all three `LEVEL0–2.000` 256×64 block grids with their 8×8 collision masks, event layers, and start records, plus `SOUNDS.000` gun/jump/pickup effects. It does **not** include the raw installation or archive. OpenJazz is GPL-2.0-or-later and original game data remains subject to its own rights. Additional episodes/levels require the corresponding original level files (see *Regenerating data* below).
+> **Current scope / legal status:** the repository ships with a **locally converted JJ1 pack** derived from a user-supplied shareware installation: `MAINCHAR.000` Jazz animation frames, `BLOCKS.000` terrain patterns, the available episode 1 level grids with their 8×8 collision masks, event layers and start records, plus converted scene, menu and sound assets. It does **not** include the raw installation or archive. OpenJazz is GPL-2.0-or-later and original game data remains subject to its own rights. Additional episodes/levels require the corresponding original level files (see *Regenerating data* below).
 
 ## What is implemented
 
 - **Physics matched to the original model** in 8.8 fixed-point per frame: two-tier walk (2.50 px/f) / run (5.08 px/f) acceleration with distinct stop and turn decelerations; an 84 px target-height variable jump with a running-speed bonus, cut short by releasing the button or bonking a ceiling; gravity only while rising and the original's immediate terminal fall speed; 4 px mask ramp following.
 - **Data-driven entities from the original event grids**: items (score/health/extra-life), walking and flying enemies, static hazards, springs (button-independent relaunch of the same jump-ascent rule), one-way platforms, and end-of-level signs are all resolved through per-level event tables in `src/jj1_eventset.c`. A taken-bitmap makes items collect once and killed enemies stay dead; an 8-slot pool activates enemies near the player, scanning one grid column per frame to bound 68000 cost.
-- **Original rendering path**: streaming 88-block VRAM cache over the 256×64 maps on Plane A, sky gradient on Plane B, HUD, camera, springs and uncollected items drawn straight from the event grid.
-- **Three-stage episode flow** with exits, transitions, lives/health, pause, game over, and completion.
+- **Original rendering path**: streaming 64-block VRAM cache over the 256×64 maps on Plane A, sky gradient on Plane B, HUD, camera, springs and uncollected items drawn straight from the event grid.
+- **Episode flow** with exits, transitions, lives/health, pause, game over, and completion.
+- **Original-art presentation**: startup animation and credit pages, title, six highlighted menu choices, level-clear animation, and bonus-win animation. Screen palettes are reduced for Genesis hardware. All six menu actions work, including original instruction and order pages, four SRAM save slots, and Genesis-specific setup options.
 
 Platform-neutral logic lives in `src/game_core.c` + `src/jj1_runtime.c` and compiles unchanged on the host for testing and inside the ROM.
 
@@ -34,13 +35,59 @@ Repeat per level. `src/jj1_eventset.c` picks up `jj1_levelN_eventset.inc` files 
 | B or C | Jump |
 | Start | Start game / pause / resume |
 
-### Bonus levels
+#### Weapon sound regeneration
 
-Finish a stage while holding the **bonus diamond** and that world's bonus level starts: D-pad up/down walk, left/right turn, **A** run, **B/C** jump. Collect all the gems before the clock runs out (hourglasses add a minute; the exit sign gives up). Winning grants an extra life. They are also in the stage-select list below as BONUS 1-3.
+```sh
+python3 tools/build_shot_sounds.py --input /path/to/shareware --output res/jj1
+```
+
+The weapon clips use the original shareware bullet sound slots and their recorded rates. SGDK converts them to the XGM driver’s fixed playback rate. The fourth special shot has no assigned firing sound in these levels.
+
+### Planet approaches and episode ending
+
+```sh
+python3 tools/build_planets.py --input /path/to/shareware
+python3 tools/build_episode_ending.py --input /path/to/shareware
+```
+
+These generate the original shareware planet/ending tile assets and scene data.
+Planet scaling is sampled at 10 Hz; the original ENDE1 text pages wait for a
+button and its animation plays at 14 fps. See `PORTING_STATUS.md` for remaining
+scene, menu and gameplay limitations.
+
+## Main menu and saves
+
+Use UP/DOWN and START in the main menu. **Load Game** offers four slots. To
+save, press START during a level to pause, then C; select a slot with UP/DOWN
+and A or START. B/C cancels. Saving overwrites the chosen slot; it preserves
+the current port's game state, including position and collected items. Loading
+resumes that state in the level. Saves and settings require persistent cartridge
+SRAM or an emulator that saves its `.srm` data. They are not DOS/OpenJazz saves
+and may not be compatible with future versions of this work-in-progress port.
+
+**Instructions** and **Order Info** contain the original shareware pages.
+A/START/RIGHT/DOWN advances, LEFT/UP goes back, and B/C exits. Original DOS
+key hints are retained as artwork; the bottom line gives Genesis controls.
+Order details are historical and may no longer be valid.
+
+**Setup Options** toggles music and effects and selects among A-fire/B-jump,
+B-fire/A-jump, and C-fire/B-jump layouts (the remaining button cycles weapons).
+Settings persist in SRAM. Bonus stages use the configured fire button to run
+and either other button to jump. The main-menu, viewer and pause controls stay fixed.
+
+To regenerate the original information pages:
+
+```sh
+python3 tools/build_menu_pages.py --input /path/to/shareware
+```
+
+## Bonus levels
+
+Finish a stage while holding the **bonus diamond** and that world's bonus level starts: D-pad up/down walk, left/right turn, **A** run, **B/C** jump (or the configured fire button to run and either other button to jump). Collect all the gems before the clock runs out (hourglasses add a minute; the exit sign gives up). Winning grants an extra life. Jazz uses the original BONUS.000 player frames and animation lists from BONUSMAP.00n. They are also in the stage-select list below as BONUS 1-3.
 
 ### Stage select
 
-Stage select is always on. On the title screen press **UP/DOWN** to choose the starting stage (the list continues with BONUS 1-3), then **START**. It is enabled by `cheatUnlocked = 1` in `src/main.c`; set it to 0 to bring back the secret pad code (UP, UP, DOWN, DOWN, LEFT, RIGHT, LEFT, RIGHT, B, A) that unlocks it.
+On the title screen **or main menu**, enter **UP, UP, DOWN, DOWN, LEFT, RIGHT, LEFT, RIGHT, B, A** (release between repeated buttons). Once unlocked, select a stage or BONUS 1–3 with **UP/DOWN** on the title or **LEFT/RIGHT** on the menu. Press **START** to open the menu, then **START** on New Game. The unlock lasts until reset.
 
 ### Official SGDK (2.x)
 
@@ -59,7 +106,7 @@ The checked build used SGDK 2.11 with a native Linux `m68k-linux-gnu-` cross com
 ```bash
 export GDK=/path/to/sgdk
 export PREFIX=m68k-linux-gnu-
-export PATH="$GDK/bin:$PATH"      # native sjasm/bintos helpers
+export PATH="$GDK/bin:$PATH"      # native sjasm, bintos and xgmtool helpers
 make GDK="$GDK" PREFIX="$PREFIX" release
 ```
 
@@ -112,7 +159,16 @@ The catalog command converts **every available** `BLOCKS.*` set, `SPRITES.*` set
 
 ```bash
 python3 tools/build_sgdk_bonus.py --input ~/jazz/JAZZ    # writes res/bonus/*.bin and src/jj1_bonus_data.inc
+python3 tools/build_bonus_player.py --input ~/jazz/JAZZ # writes src/jj1_bonus_player.inc
 ```
+
+## Startup, title, menu and clear scenes
+
+```bash
+python3 tools/build_sgdk_scenes.py --input ~/jazz/JAZZ
+```
+
+This produces `res/scenes/*.bin` and `src/jj1_scene_data.inc` from the original `.0SC`, `MENU.000`, and `FONTMN2.0FN` files. The STARTUP `BLOCK3` sound is exported by `tools/import_jj1_shareware.py` from `SOUNDS.000` and copied to `res/jj1/BLOCK3.wav`. The converted End Level track is from the FM soundtrack converter linked in `THIRD_PARTY.md`.
 
 ## Font
 
@@ -143,7 +199,7 @@ python3 tools/build_sgdk_font.py --input ~/jazz/JAZZ/FONT2.0FN --output res/jj1_
 2. Convert level event streams into Genesis-friendly chunk/tile/object data and stream 64×32 plane columns.
 3. Port selected GPL-compatible OpenJazz JJ1 rules in fixed-point C, preserving original event identifiers and episode flow.
 4. Convert graphics to 16-colour palette banks and music/SFX to XGM/XGM2/PCM within VRAM, sprite-per-line, and Z80 budgets.
-5. Add save RAM, all shareware worlds, guardian/boss behavior, bonus levels, ending flow, regression recordings, and hardware tests.
+5. Expand gameplay and presentation fidelity, secret-level support, regression recordings, and hardware tests.
 
 ## References
 
@@ -160,7 +216,14 @@ GDK=/path/to/sgdk tests/run_headless_emulator_test.sh
 ```
 
 - The **host suite** compiles the exact game core, JJ1 runtime, and converted level data with a native compiler and asserts point-to-point behaviour: spawn settling on the original masks of all three levels, walk/run speed tiers, the 84 px variable jump, immediate terminal fall, item collection with the taken bitmap, enemy activation/kill/no-respawn, contact damage and invulnerability, spring launch heights, end-sign exits, and full episode completion.
-- The **headless emulator suite** needs no display: it builds the Genesis Plus GX libretro core, runs a `-DJAZZ_AUTOTEST` ROM whose 68000-side assertions report through an SRAM marker, then scripts a title → START → run/jump playthrough of the release ROM and asserts framebuffer pixels (title text, Jazz sprite, sky, converted terrain, advancing animation, camera scrolling, live HUD). Screenshots land in `tests/artifacts/`.
+- The **headless emulator suite** needs no display: it builds the Genesis Plus GX libretro core, runs a `-DJAZZ_AUTOTEST` ROM whose 68000-side assertions report through an SRAM marker, then scripts a title → menu → New Game → run/jump playthrough of the release ROM and asserts framebuffer pixels (title artwork, Jazz sprite, sky, converted terrain, advancing animation, camera scrolling, live HUD). Screenshots land in `tests/artifacts/`.
 - `tests/run_emulator_test.sh` remains as an optional X-based BlastEm variant.
 
-See `TEST_REPORT.md` for the latest results and remaining gaps (original sprite/animation mapping, music, bosses, warps, and additional worlds pending their level files).
+See `PORTING_STATUS.md` for the latest results and remaining gaps. `TEST_REPORT.md` is an earlier report.
+
+## Still missing
+
+See `PORTING_STATUS.md` for the exact scope and test results of this revision.
+
+
+This is not a completed shareware port; see `PORTING_STATUS.md` for the remaining gameplay and presentation gaps.

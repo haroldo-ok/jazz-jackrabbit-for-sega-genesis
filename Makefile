@@ -41,3 +41,19 @@ include $(GDK)/makefile.gen
 # - --build-id=none: Linux-target binutils emit .note.gnu.build-id at address 0,
 #   colliding with the 68000 vector table. Harmless with a real m68k-elf toolchain.
 LIBGCC := $(GDK)/lib/libgcc.a -Wl,--build-id=none
+
+# SGDK 2.11 used boot/rom_head.c plus an embedded header, whereas newer
+# releases compile src/rom_header.c automatically. Do not link it twice on
+# the older release; compile the project's header into the boot binary.
+ifeq ($(wildcard $(GDK)/src/boot/rom_header.c),)
+OBJS := $(filter-out $(OUT)/src/rom_header.o,$(OBJS))
+$(OUT)/rom_head.o: src/rom_header.c
+	$(MKDIR) -p $(dir $@)
+	$(CC) $(DEFAULT_FLAGS) -c src/rom_header.c -o $@
+endif
+
+# rescomp creates headers as a side effect of compiling each resource. Ensure
+# they exist before compiling C files, including on parallel clean builds.
+$(OUT)/src/main.o $(OUT)/src/bonus_view.o $(OUT)/src/jj1_scenes.o: \
+  $(OUT)/res/jj1_sounds.o $(OUT)/res/jj1_music.o $(OUT)/res/jj1_font.o \
+  $(OUT)/res/jj1_bonus.o $(OUT)/res/jj1_scenes_res.o $(OUT)/res/jj1_menu_pages.o

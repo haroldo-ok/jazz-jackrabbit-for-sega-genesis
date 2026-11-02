@@ -28,3 +28,8 @@ res/jj1_music.h
 # github.com/haroldo-ok/convert-s3m-vgm-jazzjackrabbit-md.  Uncomment to keep
 # the audio out of a public repo and have contributors supply their own.
 #res/music/*.vgm
+
+# Local SGDK boot files and generated scene resource header
+src/boot/
+res/jj1_scenes_res.h
+tools/__pycache__/

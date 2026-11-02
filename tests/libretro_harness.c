@@ -83,10 +83,9 @@ static void video_cb(const void *data, unsigned width, unsigned height, size_t p
                (const uint8_t *)data + y * pitch, (size_t)width * 2);
 }
 
-/* Audio is summarised, never recorded: the harness only accumulates signal
- * energy and a peak so a test can assert that the music driver is actually
- * producing sound (and that different stages differ), without keeping any
- * audio.  Reset between measurement windows via audio_reset(). */
+/* Normally only measure energy; an optional JAZZ_CAPTURE path records raw
+ * interleaved stereo s16 audio for waveform-identity tests. */
+static FILE *audioFile;
 static double audioEnergy;
 static unsigned long audioSamples;
 static int audioPeak;
@@ -108,6 +107,7 @@ static void audio_accumulate(int16_t sample)
 
 static void audio_cb(int16_t left, int16_t right)
 {
+    if (audioFile) { fwrite(&left, sizeof(left), 1, audioFile); fwrite(&right, sizeof(right), 1, audioFile); }
     audio_accumulate(left);
     audio_accumulate(right);
 }
@@ -115,6 +115,7 @@ static void audio_cb(int16_t left, int16_t right)
 static size_t audio_batch_cb(const int16_t *data, size_t frames)
 {
     size_t i;
+    if (audioFile) fwrite(data, sizeof(*data), frames * 2, audioFile);
     for (i = 0; i < frames * 2; i++) audio_accumulate(data[i]);
     return frames;
 }
@@ -272,6 +273,10 @@ int main(int argc, char **argv)
     retro_set_audio_sample_batch_fn(audio_batch_cb);
     retro_set_input_poll_fn(input_poll_cb);
     retro_set_input_state_fn(input_state_cb);
+    if (getenv("JAZZ_CAPTURE")) {
+        audioFile = fopen(getenv("JAZZ_CAPTURE"), "wb");
+        if (!audioFile) { perror("JAZZ_CAPTURE"); return 2; }
+    }
     retro_init_fn();
 
     rom = fopen(argv[2], "rb");
@@ -289,6 +294,15 @@ int main(int argc, char **argv)
     info.size = (size_t)romSize;
     if (!retro_load_game_fn(&info)) { fprintf(stderr, "retro_load_game failed\n"); return 2; }
 
+    if (getenv("JAZZ_SRAM_IN")) {
+        void *sram = retro_get_memory_data_fn(RETRO_MEMORY_SAVE_RAM);
+        size_t size = retro_get_memory_size_fn(RETRO_MEMORY_SAVE_RAM);
+        FILE *f = fopen(getenv("JAZZ_SRAM_IN"), "rb");
+        if (!f || !sram || !size || fread(sram, 1, size, f) != size) {
+            fprintf(stderr,"Cannot load SRAM image (%zu bytes)\n",size); return 2;
+        }
+        fclose(f);
+    }
     audio_reset();
     for (currentFrame = 0; currentFrame < totalFrames; currentFrame++) {
         retro_run_fn();
@@ -313,5 +327,14 @@ int main(int argc, char **argv)
         } else printf(" none");
         printf("\n");
     }
+    if (getenv("JAZZ_SRAM_OUT")) {
+        void *sram = retro_get_memory_data_fn(RETRO_MEMORY_SAVE_RAM);
+        FILE *f = fopen(getenv("JAZZ_SRAM_OUT"), "wb");
+        if (!f || !sram || fwrite(sram, 1, 65536, f) != 65536) {
+            fprintf(stderr,"Cannot save SRAM image\n"); return 2;
+        }
+        fclose(f);
+    }
+    if (audioFile) fclose(audioFile);
     return 0;
 }

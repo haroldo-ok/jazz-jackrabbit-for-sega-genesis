@@ -81,13 +81,17 @@ def parse_sprites(path):
             sm = [0] * length
             for i in range(length):
                 sm[(i >> 2) + (i & 3) * (length >> 2)] = mask[i]
-            npix = sum(sm)
-            raw = r.block(npix)
             px = [0] * length
-            k = 0
             for i in range(length):
                 if sm[i]:
-                    px[i] = raw[k]; k += 1
+                    # OpenJazz File::loadPixels skips zero padding bytes: zero
+                    # is the transparent key and can never be an opaque pixel.
+                    value = 0
+                    while value == 0:
+                        if r.pos >= end:
+                            raise ValueError("unterminated masked BONUS sprite")
+                        value = r.byte()
+                    px[i] = value
             pixels = bytes(px[(i >> 2) + (i & 3) * (length >> 2)] for i in range(length))
             mask_ = bytes(mask)
             out.append((w, h, pixels, mask_))

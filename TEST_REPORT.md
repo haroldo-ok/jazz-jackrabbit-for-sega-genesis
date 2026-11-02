@@ -1,3 +1,41 @@
+# Test report — implemented menu actions
+
+- Host tests pass, including regeneration of all 12 instruction pages, all 17
+  order pages and their 116 chunks from the supplied shareware data.
+- Genesis Plus GX: page navigation, return to menu, empty and corrupt save
+  rejection, save into slots 1 and 2 without overwriting slot 1, and load in a
+  fresh emulator process with an imported 64 KiB SRAM image all passed.
+- Persistent setup settings, muted music after restarting, menu cursor, and the
+  original stage-select cheat passed. Cartridge SRAM was exercised through the
+  target's 68000, not simulated by a host-only save routine.
+- Host suite, full headless gameplay/bonus suite, original scene tests, planet
+  and ending tests, and firing-waveform tests passed. No real hardware or PAL
+  hardware has been tested. SRAM format is specific to this port.
+- Entries below are historical; refer to the latest report and
+  `PORTING_STATUS.md` when older statements differ.
+
+# Test report — planet approaches and episode presentation
+
+- Verified all four PLANET files, scaled approach frames, labels, palette data
+  and same-planet suppression in Genesis Plus GX. Stage mappings use the
+  actual level world, including the guardian's PLANET.018.
+- Verified the real final-stage transition to the original ENDE1 background,
+  scripted text, animation, music and return to title. START/A/C/RIGHT advance
+  text pages. The ending is Genesis-adapted; not all palette fades are present.
+- Verified both bonus outcomes in emulator: full-frame white-out, return after
+  loss and bonus-win animation after victory. Fade timing is VBlank-based.
+- Level-clear selection was checked against each shareware level's end-scene
+  field. Host scene asset round-trips PASS. Full headless, scene, audio-waveform
+  and presentation integration suites PASS.
+- Scope remains incomplete, notably the secret level/branch and other gameplay fidelity; see `PORTING_STATUS.md`.
+
+# Test report — weapon firing audio fix
+
+- The toaster now uses the original `FLAMER` firing sound, not `FIRE1` (the Rapid Fire voice). Blaster uses `MACHGUN1`, upward uses `PHOTON`, and bouncer uses `ROCKET2`; the fourth shot has no assigned sample in the shareware level data.
+- These clips use the actual 10 kHz or 13 kHz source rates from each level's sound table, converted to the XGM driver's playback rate. All seven shareware stages, source PCM bytes, and sample-slot associations were cross-checked with the supplied game data.
+- Host tests PASS. `tests/run_shot_emulator_test.sh` exercised the actual sound dispatch in Genesis Plus GX and compared emitted audio waveforms against all four original clips and the unwanted voice; it also checked silence for the unassigned shot. Scene and full headless emulator suites PASS.
+- The entries below are historical reports; where they conflict with the newer report or `PORTING_STATUS.md`, use the newer information.
+
 # Test report — 2026-11-01 (bonus levels)
 
 - **Stage select is always on** (`cheatUnlocked = 1`); the emulator suite now asserts the picker is visible at boot and that UP changes the stage.

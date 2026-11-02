@@ -3,14 +3,16 @@
  * The floor is the original's perspective texture map, sampled at 80x20 and
  * written 4x4 pixels per sample straight into a RAM tile buffer that is
  * DMA'd to VRAM each frame.  Items are the original gem/clock/glove/exit
- * graphics, pre-scaled to four sprite sizes; the player is drawn as a plain
- * ball with a shadow. */
+ * graphics, pre-scaled to four sprite sizes. The player is the original
+ * 72x88 bonus animation, streamed as a nine-sprite VDP composite. */
 #include <genesis.h>
+#include "jj1_options.h"
 #include "jazz_gfx.h"
 #include "bonus_view.h"
 #include "jj1_bonus.h"
 #include "jj1_sounds.h"
 #include "jj1_bonus_data.inc"
+#include "jj1_bonus_player.inc"
 
 #define FLOOR_COLS   40
 #define FLOOR_ROWS   10
@@ -23,51 +25,39 @@
 #define T_STRIP   (T_FLOOR + FLOOR_TILES)
 #define T_ITEMS   (T_STRIP + 192)
 #define ITEM_TILES 30               /* 16 + 9 + 4 + 1 per item type */
-#define T_BALL    (T_ITEMS + 4 * ITEM_TILES)
-#define T_SHADOW  (T_BALL + 4)
-#define T_SKY     (T_SHADOW + 2)    /* 15 solid tiles, one per gradient row */
+#define T_HERO    (T_ITEMS + 4 * ITEM_TILES)
+#define HERO_TILES 99
+#define T_SKY     (T_HERO + HERO_TILES)    /* 15 solid tiles, one per gradient row */
+
+typedef char bonus_vram_fits[(T_SKY + 15 <= JJ1_VRAM_TILE_LIMIT) ? 1 : -1];
 
 #define SFX_BONUS_GOD 77            /* XGM PCM ids; the main game uses 64-76 */
 #define SFX_BONUS_OW  68            /* shared with the main game's "ow" */
 
 #define MUL(x, y) ((s32)(((s32)(x) * (s32)(y)) >> 10))
 
-static u8 floorBuf[FLOOR_TILES * 32];
+static u8 floorBuf[FLOOR_TILES * 32] __attribute__((aligned(2)));
 static u16 quadTab[16];     /* palette index -> four identical 4bpp pixels */
 static s32 rowDist[SAMPLES_Y];
 static BonusGame bg;
 
-/* The player marker is a plain ball with a shadow, generated from circle
- * equations in palette colours: outline, red body, white glint. */
-static u32 ballTiles[4 * 8];
-static u32 shadowTiles[2 * 8];
-
-static void make_marker(void)
+/* Nine hardware sprites preserve the original 68x88 art at native size. */
+static u16 draw_player(u16 count, s16 zpx)
 {
-    u8 x, y, t;
-    memset(ballTiles, 0, sizeof(ballTiles));
-    memset(shadowTiles, 0, sizeof(shadowTiles));
-    for (y = 0; y < 16; y++) {
-        for (x = 0; x < 16; x++) {
-            s16 dx = (s16)(2 * x - 15), dy = (s16)(2 * y - 15);
-            s16 d2 = (s16)(dx * dx + dy * dy);
-            s16 gx = (s16)(2 * x - 9), gy = (s16)(2 * y - 9);
-            u8 c = 0;
-            if (d2 <= 225) c = (d2 > 169) ? 10 : 9;                  /* outline / body */
-            if (c && (gx * gx + gy * gy) <= 12) c = 1;               /* glint */
-            if (c) {
-                t = (u8)(((x >> 3) * 2) + (y >> 3));                  /* column-major tiles */
-                ballTiles[t * 8 + (y & 7)] |= (u32)c << ((7 - (x & 7)) * 4);
-            }
+    static const u8 widths[3] = {4, 4, 1};
+    static const u8 heights[3] = {4, 4, 3};
+    u16 tile = T_HERO;
+    u8 row, col;
+    for (row = 0; row < 3; row++) {
+        for (col = 0; col < 3; col++) {
+            VDP_setSpriteFull(count, 124 + col * 32, 120 - zpx + row * 32,
+                SPRITE_SIZE(widths[col], heights[row]),
+                TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, tile), (u8)(count + 1));
+            count++;
+            tile += widths[col] * heights[row];
         }
     }
-    for (y = 0; y < 8; y++) {
-        for (x = 0; x < 16; x++) {
-            s16 dx = (s16)(2 * x - 15), dy = (s16)(2 * y - 7) * 2;
-            if (dx * dx + dy * dy <= 225)
-                shadowTiles[(x >> 3) * 8 + y] |= (u32)11 << ((7 - (x & 7)) * 4);
-        }
-    }
+    return count;
 }
 
 static void render_floor(const BonusGame *b)
@@ -92,8 +82,8 @@ static void render_floor(const BonusGame *b)
         for (n = 0; n < FLOOR_COLS; n++) {
             u8 k;
             for (k = 0; k < 2; k++) {
-                /* the pixel is the high word of the 16.16 position (big-endian) */
-                u16 px = *(const u16 *)&u & 8191, py = *(const u16 *)&v & 8191;
+                /* High word of the 16.16 coordinate; avoid type-punning. */
+                u16 px = (u16)((u32)u >> 16) & 8191, py = (u16)((u32)v >> 16) & 8191;
                 u16 key = ((py & 0x1FE0) << 3) | (px >> 5);
                 u16 quad;
                 u16 *w;
@@ -185,16 +175,16 @@ static u8 bonus_input(u16 pad)
     if (pad & BUTTON_DOWN) in |= BONUS_INPUT_DOWN;
     if (pad & BUTTON_LEFT) in |= BONUS_INPUT_LEFT;
     if (pad & BUTTON_RIGHT) in |= BONUS_INPUT_RIGHT;
-    if (pad & BUTTON_A) in |= BONUS_INPUT_RUN;
-    if (pad & (BUTTON_B | BUTTON_C)) in |= BONUS_INPUT_JUMP;
+    if (pad & (jj1_controls == 1 ? BUTTON_B : jj1_controls == 2 ? BUTTON_C : BUTTON_A)) in |= BONUS_INPUT_RUN;
+    if (pad & (jj1_controls == 1 ? (BUTTON_A | BUTTON_C) : jj1_controls == 2 ? (BUTTON_A | BUTTON_B) : (BUTTON_B | BUTTON_C))) in |= BONUS_INPUT_JUMP;
     return in;
 }
 
 static void play_bonus_sound(u8 se)
 {
     /* event sound ids are the original's slot numbers: 3 = fanfare, 4 = "ow" */
-    if (se == 3) XGM_startPlayPCM(SFX_BONUS_GOD, 2, SOUND_PCM_CH4);
-    else if (se == 4) XGM_startPlayPCM(SFX_BONUS_OW, 2, SOUND_PCM_CH4);
+    if (se == 3) jj1_sfx_start(SFX_BONUS_GOD, 2, SOUND_PCM_CH4);
+    else if (se == 4) jj1_sfx_start(SFX_BONUS_OW, 2, SOUND_PCM_CH4);
 }
 
 int bonus_play(u8 index, const u8 *music)
@@ -203,7 +193,10 @@ int bonus_play(u8 index, const u8 *music)
     static const u8 *const events[3] = { jj1_bonus_events0, jj1_bonus_events1, jj1_bonus_events2 };
     int result = BONUS_CONTINUE;
     u16 lastTimer, x, y, whiteFrames = 0, frame = 0;
+    const u16 whiteDuration = SYS_isPAL() ? 100 : 120; /* original 2000 ms */
+    u16 originalPalettes[64];
     u8 k, row;
+    u8 loadedPlayerFrame = 0xFF;
 
     for (k = 0; k < 16; k++) quadTab[k] = (u16)(k | (k << 4) | (k << 8) | (k << 12));
     if (index > 2) index = 0;
@@ -227,6 +220,7 @@ int bonus_play(u8 index, const u8 *music)
     DMA_setMaxTransferSize(16384);
 
     PAL_setPalette(PAL2, jj1_bonus_sky_palette, CPU);
+    PAL_setPalette(PAL3, jj1_bonus_player_palette, CPU);
     for (k = 0; k < 15; k++) {
         u32 sky[8]; u8 j;
         for (j = 0; j < 8; j++) sky[j] = 0x11111111UL * (u32)(k + 1);
@@ -248,9 +242,6 @@ int bonus_play(u8 index, const u8 *music)
             for (sz = 0; sz < 4; sz++) { VDP_loadTileData(tbl[it][sz], at, cnt[sz], CPU); at += cnt[sz]; }
         }
     }
-    make_marker();
-    VDP_loadTileData(ballTiles, T_BALL, 4, CPU);
-    VDP_loadTileData(shadowTiles, T_SHADOW, 2, CPU);
 
     /* sky rows, background strip, floor map */
     for (y = 0; y < 15; y++)
@@ -270,12 +261,16 @@ int bonus_play(u8 index, const u8 *music)
         rowDist[row] = (s32)(((819200L) << 0) / (92 - yo));     /* 800/(92-y) in 10-bit fixed point */
     }
 
-    XGM_startPlay(music);
+    PAL_getColors(0, originalPalettes, 64);
+    jj1_music_start(music);
     lastTimer = vtimer;
+#ifdef BONUS_FORCE_RESULT
+    result = BONUS_FORCE_RESULT; /* deterministic integration-test build */
+#endif
 
     while (TRUE) {
         u16 pad = JOY_readJoypad(JOY_1);
-        u16 now = vtimer, steps = (u16)(now - lastTimer), count = 0;
+        u16 now = vtimer, elapsed = (u16)(now - lastTimer), steps = elapsed, count = 0;
         s32 zpx;
         lastTimer = now;
         if (steps < 1) steps = 1;
@@ -289,9 +284,11 @@ int bonus_play(u8 index, const u8 *music)
             }
         } else {
             /* end of level: spin and fade to white, as the original does */
+            if (whiteFrames >= whiteDuration) break;
+            if (!elapsed) elapsed = 1;
             bg.direction += 12 + (whiteFrames >> 1);
-            whiteFrames++;
-            if (whiteFrames > 90) break;
+            whiteFrames = (u16)(whiteFrames + elapsed);
+            if (whiteFrames > whiteDuration) whiteFrames = whiteDuration;
         }
         frame++;
 
@@ -301,14 +298,21 @@ int bonus_play(u8 index, const u8 *music)
         draw_hud(&bg);
         VDP_setHorizontalScroll(BG_B, -bg.direction);
 
-        /* player marker + shadow, then items */
+        /* OpenJazz maps player states to BONUSMAP animation slots 0..6.
+         * Advance at 75 ms/frame; each slot retains its original frame list. */
+        {
+            u8 anim = bg.crashed ? 5 : bg.z > 0 ? 4 :
+                      (pad & BUTTON_LEFT) ? 1 : (pad & BUTTON_RIGHT) ? 2 :
+                      (pad & (BUTTON_UP | BUTTON_DOWN)) ? 0 : 6;
+            u8 n = jj1_bonus_player_counts[index][anim];
+            u8 which = jj1_bonus_player_anims[index][anim][(bg.ticks / 75) % n];
+            if (which != loadedPlayerFrame) {
+                VDP_loadTileData(jj1_bonus_player_frames[which], T_HERO, HERO_TILES, CPU);
+                loadedPlayerFrame = which;
+            }
+        }
         zpx = (bg.z * 80) >> 10;
-        VDP_setSpriteFull(count, 152, 224 - 40 - zpx, SPRITE_SIZE(2, 2),
-                          TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_BALL), (u8)(count + 1));
-        count++;
-        VDP_setSpriteFull(count, 152, 224 - 24, SPRITE_SIZE(2, 1),
-                          TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, T_SHADOW), (u8)(count + 1));
-        count++;
+        count = draw_player(count, (s16)zpx);
 #ifndef BONUS_NOITEMS
         count = draw_items(&bg, count);
 #endif
@@ -316,14 +320,18 @@ int bonus_play(u8 index, const u8 *music)
         VDP_updateSprites(count, DMA_QUEUE);
 
         if (result != BONUS_CONTINUE) {
-            /* fade the palette towards white */
-            u16 pal[16], i, lvl = (whiteFrames * 7) / 90;
-            for (i = 0; i < 16; i++) {
-                u16 r = (jj1_bonus_palette[i] >> 1) & 7, g = (jj1_bonus_palette[i] >> 5) & 7, bl = (jj1_bonus_palette[i] >> 9) & 7;
-                r += ((7 - r) * lvl) / 7; g += ((7 - g) * lvl) / 7; bl += ((7 - bl) * lvl) / 7;
-                pal[i] = (u16)((bl << 9) | (g << 5) | (r << 1));
+            /* White out the entire frame, including sky and HUD. Timing is
+             * based on VBlanks rather than slow perspective-render frames. */
+            u16 pal[16], bank, i, lvl = (whiteFrames * 7) / whiteDuration;
+            for (bank = 0; bank < 4; bank++) {
+                for (i = 0; i < 16; i++) {
+                    u16 color = originalPalettes[bank * 16 + i];
+                    u16 r = (color >> 1) & 7, g = (color >> 5) & 7, bl = (color >> 9) & 7;
+                    r += ((7 - r) * lvl) / 7; g += ((7 - g) * lvl) / 7; bl += ((7 - bl) * lvl) / 7;
+                    pal[i] = (u16)((bl << 9) | (g << 5) | (r << 1));
+                }
+                PAL_setPalette(bank, pal, DMA);
             }
-            PAL_setPalette(PAL1, pal, DMA);
         }
 #ifndef BONUS_NODMA
         DMA_queueDma(DMA_VRAM, floorBuf, T_FLOOR * 32, FLOOR_TILES * 16, 2);

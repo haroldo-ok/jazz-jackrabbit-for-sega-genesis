@@ -1,4 +1,6 @@
 #include <genesis.h>
+#include "jj1_options.h"
+#include "jj1_save.h"
 #include "jazz_game.h"
 #include "jazz_gfx.h"
 #include "jj1_events.h"
@@ -7,28 +9,16 @@
 #include "jj1_music.h"
 #include "jj1_font.h"
 #include "bonus_view.h"
+#include "stage_cheat.h"
+#include "jj1_scenes.h"
 
-/* XGM PCM sample IDs (user range 64+); channel 1 stays with the music. */
-#define JJ1_SFX_FIRE   64
-#define JJ1_SFX_JUMP   65
-#define JJ1_SFX_PICKUP 66
-#define JJ1_SFX_BOOM   67
-#define JJ1_SFX_OW     68
-#define JJ1_SFX_ONEUP  69
-#define JJ1_SFX_YEAHOO 70
-#define JJ1_SFX_FLAME  71
-#define JJ1_SFX_PHOTON 72
-#define JJ1_SFX_SPRING 73
-#define JJ1_SFX_INVULN 74
-#define JJ1_SFX_BIRDY  75
-#define JJ1_SFX_ROCKET 76
-#define JJ1_SFX_GODLIKE 77
+#include "jj1_sfx.h"
 
 #define SCREEN_W 320
 #define PLAYER_W 14
 #define PLAYER_H 22
 
-typedef enum { MODE_TITLE, MODE_PLAY, MODE_GAMEOVER, MODE_COMPLETE } GameMode;
+typedef enum { MODE_TITLE, MODE_MENU, MODE_PLAY, MODE_GAMEOVER, MODE_COMPLETE } GameMode;
 
 static JazzGame game;
 static GameMode mode;
@@ -61,10 +51,17 @@ static const u8 stageBonus[JAZZ_STAGE_COUNT] = {
 };
 #undef STAGE
 
+static const u8 stage_has_clear_scene[JAZZ_STAGE_COUNT] = {
+#include "jj1_episode_end_scenes.inc"
+};
+
+static u16 approachedPlanet = 0xFFFF;
 static u8 selectedStage;   /* level select on the title screen */
-static u8 cheatUnlocked = 1;   /* stage select is always on (the pad code below still works if this is cleared) */
+static u8 cheatUnlocked = 0;   /* unlocked by the pad code until reset */
 static u8 cheatProgress;   /* how many pad-code steps have been matched */
+static u8 menuOption;
 static u16 titlePreviousPad;
+static u16 playPreviousPad;
 
 
 static u16 input_from_pad(u16 pad)
@@ -72,9 +69,9 @@ static u16 input_from_pad(u16 pad)
     u16 input = 0;
     if (pad & BUTTON_LEFT) input |= JAZZ_INPUT_LEFT;
     if (pad & BUTTON_RIGHT) input |= JAZZ_INPUT_RIGHT;
-    if (pad & BUTTON_B) input |= JAZZ_INPUT_JUMP;
-    if (pad & BUTTON_A) input |= JAZZ_INPUT_FIRE;
-    if (pad & BUTTON_C) input |= JAZZ_INPUT_SWITCH;   /* cycle weapons */
+    if (pad & (jj1_controls == 1 ? BUTTON_A : BUTTON_B)) input |= JAZZ_INPUT_JUMP;
+    if (pad & (jj1_controls == 1 ? BUTTON_B : jj1_controls == 2 ? BUTTON_C : BUTTON_A)) input |= JAZZ_INPUT_FIRE;
+    if (pad & (jj1_controls == 2 ? BUTTON_A : BUTTON_C)) input |= JAZZ_INPUT_SWITCH;
     if (pad & BUTTON_DOWN) input |= JAZZ_INPUT_DOWN;  /* crouch / airboard down */
     if (pad & BUTTON_UP) input |= JAZZ_INPUT_UP;      /* look up / airboard up */
     if (pad & BUTTON_START) input |= JAZZ_INPUT_START;
@@ -141,7 +138,7 @@ static void draw_status_line(const JazzGame *g)
 
     pos = 0;
     if (g->paused) {
-        const char *text = "        PAUSED - START RESUMES";
+        const char *text = "PAUSED  START RESUME  C SAVE";
         while (*text) line[pos++] = *text++;
     } else if (g->transitionTimer) {
         const char *text = "              EXIT FOUND!";
@@ -159,7 +156,8 @@ static void draw_status_line(const JazzGame *g)
         };
         const char *wpn = weaponText[(g->player.shotType < JAZZ_SHOT_TYPES) ?
                                      g->player.shotType : 0];
-        const char *keys = "  A FIRE B JUMP C WPN";
+        static const char *const keysText[] = { "  A FIRE B JUMP C WPN", "  B FIRE A JUMP C WPN", "  C FIRE B JUMP A WPN" };
+        const char *keys = keysText[jj1_controls];
         while (*text) line[pos++] = *text++;
         while (*wpn) line[pos++] = *wpn++;
         while (*keys) line[pos++] = *keys++;
@@ -319,7 +317,7 @@ static void play_music(const u8 *track)
 {
     if (track == playingMusic) return;   /* already playing this one */
     playingMusic = track;
-    XGM_startPlay(track);
+    jj1_music_start(track);
 }
 
 static void render_backdrop(u8 stage)
@@ -397,6 +395,7 @@ static void load_video_assets(void)
     XGM_setPCM(JJ1_SFX_BIRDY, jj1_birdy, sizeof(jj1_birdy));
     XGM_setPCM(JJ1_SFX_ROCKET, jj1_rocket, sizeof(jj1_rocket));
     XGM_setPCM(JJ1_SFX_GODLIKE, jj1_godlike, sizeof(jj1_godlike));
+    XGM_setPCM(JJ1_SFX_BLOCK3, jj1_block3, sizeof(jj1_block3));
 }
 
 /* Follow the player with lag proportional to the distance, as the original
@@ -844,8 +843,8 @@ static u8 prevShield, prevBird;
 static void update_sfx(void)
 {
     /* Power-up pickups: sound on the frame they switch on. */
-    if (game.player.shield && !prevShield) XGM_startPlayPCM(JJ1_SFX_INVULN, 2, SOUND_PCM_CH4);
-    if (game.player.bird && !prevBird) XGM_startPlayPCM(JJ1_SFX_BIRDY, 2, SOUND_PCM_CH4);
+    if (game.player.shield && !prevShield) jj1_sfx_start(JJ1_SFX_INVULN, 2, SOUND_PCM_CH4);
+    if (game.player.bird && !prevBird) jj1_sfx_start(JJ1_SFX_BIRDY, 2, SOUND_PCM_CH4);
     prevShield = game.player.shield ? 1 : 0;
     prevBird = game.player.bird ? 1 : 0;
 
@@ -855,26 +854,23 @@ static void update_sfx(void)
        table was primed once in load_video_assets(). */
     /* Priority order: one effect per channel, most important wins. */
     if (game.events & JAZZ_EVENT_HURT)
-        XGM_startPlayPCM(JJ1_SFX_OW, 2, SOUND_PCM_CH2);
+        jj1_sfx_start(JJ1_SFX_OW, 2, SOUND_PCM_CH2);
     else if (game.events & JAZZ_EVENT_KILL)
-        XGM_startPlayPCM(JJ1_SFX_BOOM, 2, SOUND_PCM_CH2);
+        jj1_sfx_start(JJ1_SFX_BOOM, 2, SOUND_PCM_CH2);
     else if (game.events & JAZZ_EVENT_FIRE) {
-        u8 id = JJ1_SFX_FIRE;
-        if (game.player.shotType == JAZZ_SHOT_TOASTER) id = JJ1_SFX_FLAME;
-        else if (game.player.shotType == JAZZ_SHOT_SPECIAL) id = JJ1_SFX_ROCKET;
-        else if (game.player.shotType >= JAZZ_SHOT_UPWARD) id = JJ1_SFX_PHOTON;
-        XGM_startPlayPCM(id, 1, SOUND_PCM_CH2);
+        u8 id = jj1_shot_sfx(game.player.shotType);
+        if (id) jj1_sfx_start(id, 1, SOUND_PCM_CH2);
     }
     if (game.events & JAZZ_EVENT_EXIT)
-        XGM_startPlayPCM(JJ1_SFX_YEAHOO, 3, SOUND_PCM_CH3);
+        jj1_sfx_start(JJ1_SFX_YEAHOO, 3, SOUND_PCM_CH3);
     else if (game.events & JAZZ_EVENT_SPRING)
-        XGM_startPlayPCM(JJ1_SFX_SPRING, 1, SOUND_PCM_CH3);
+        jj1_sfx_start(JJ1_SFX_SPRING, 1, SOUND_PCM_CH3);
     else if (game.events & JAZZ_EVENT_JUMP)
-        XGM_startPlayPCM(JJ1_SFX_JUMP, 1, SOUND_PCM_CH3);
+        jj1_sfx_start(JJ1_SFX_JUMP, 1, SOUND_PCM_CH3);
     if (game.events & JAZZ_EVENT_LIFE)
-        XGM_startPlayPCM(JJ1_SFX_ONEUP, 3, SOUND_PCM_CH4);
+        jj1_sfx_start(JJ1_SFX_ONEUP, 3, SOUND_PCM_CH4);
     else if (game.events & (JAZZ_EVENT_GEM | JAZZ_EVENT_HEALTH))
-        XGM_startPlayPCM(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
+        jj1_sfx_start(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
 }
 
 static void show_title(void);
@@ -894,7 +890,12 @@ static int run_bonus(u8 index)
 {
     int r = bonus_play(index, jj1_music_bonus);
     playingMusic = 0;           /* the stage music must restart */
-    if ((r == BONUS_WON) && (game.lives < 9)) game.lives++;
+    if (r == BONUS_WON) {
+        if (game.lives < 9) game.lives++;
+        jj1_play_bonus_clear(jj1_music_endlevel);
+    }
+    /* The scene and bonus renderer overwrite the gameplay VRAM allocation. */
+    load_video_assets();
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
     hud_invalidate();
@@ -902,19 +903,29 @@ static int run_bonus(u8 index)
     return r;
 }
 
-static void begin_play(void)
+static void begin_play(u8 loaded)
 {
-    if (cheatUnlocked && (selectedStage >= JAZZ_STAGE_COUNT)) {
+    if (!loaded && cheatUnlocked && (selectedStage >= JAZZ_STAGE_COUNT)) {
         /* Stage-select cheat: the BONUS entries start a bonus level directly. */
         jazz_game_init(&game);
         run_bonus((u8)(selectedStage - JAZZ_STAGE_COUNT));
         show_title();
         return;
     }
-    jazz_game_init(&game);
-    /* Level select: start on the stage chosen on the title screen. */
-    if (cheatUnlocked && selectedStage) jazz_debug_set_stage(&game, selectedStage);
-    game.previousInput = JAZZ_INPUT_START;
+    /* The original title fills the same VRAM slots as gameplay. */
+    load_video_assets();
+    if (!loaded) {
+        jazz_game_init(&game);
+        if (cheatUnlocked && selectedStage) jazz_debug_set_stage(&game, selectedStage);
+    }
+    game.paused = 0;
+    approachedPlanet = 0xFFFF;
+    approachedPlanet = jj1_play_planet(game.stage, approachedPlanet);
+    playingMusic = 0;
+    load_video_assets();
+    /* Do not turn a held skip button into a jump or pause on return. */
+    playPreviousPad = JOY_readJoypad(JOY_1);
+    game.previousInput = input_from_pad(playPreviousPad);
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
     hud_invalidate();
@@ -933,73 +944,185 @@ static void begin_play(void)
  *   UP UP DOWN DOWN LEFT RIGHT LEFT RIGHT B A
  * to unlock it; afterwards UP/DOWN on the title screen choose the stage that
  * START begins on.  Once unlocked it stays on until the console is reset. */
-static const u16 cheatCode[10] = {
-    BUTTON_UP, BUTTON_UP, BUTTON_DOWN, BUTTON_DOWN,
-    BUTTON_LEFT, BUTTON_RIGHT, BUTTON_LEFT, BUTTON_RIGHT,
-    BUTTON_B, BUTTON_A
-};
-
 static void draw_level_select(void)
 {
     char line[28];
-    /*                  0123456789012345678901234     digit at index 17 */
+    /*                  0123456789012345678901234     digit at index 18 */
     const char *stageLabel = "STAGE SELECT:  <  1  >    ";
     const char *bonusLabel = "BONUS SELECT:  <  1  >    ";
     const char *label = (selectedStage >= JAZZ_STAGE_COUNT) ? bonusLabel : stageLabel;
     u8 i;
     if (!cheatUnlocked) return;   /* show_title() already blanked the plane */
     for (i = 0; label[i]; i++) line[i] = label[i];
-    line[17] = (char)('1' + ((selectedStage >= JAZZ_STAGE_COUNT) ? (selectedStage - JAZZ_STAGE_COUNT) : selectedStage));
+    line[18] = (char)('1' + ((selectedStage >= JAZZ_STAGE_COUNT) ? (selectedStage - JAZZ_STAGE_COUNT) : selectedStage));
     line[i] = 0;
-    VDP_drawTextBG(WINDOW, line, 7, 19);
+    VDP_setWindowOnBottom(2);
+    VDP_drawTextBG(WINDOW, line, 7, 26);
 }
 
 /* Feed one newly pressed button set into the cheat-code matcher. */
 static void cheat_feed(u16 pressed)
 {
     u16 face = (u16)(pressed & (BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT |
-                                BUTTON_RIGHT | BUTTON_A | BUTTON_B | BUTTON_C));
+                                BUTTON_RIGHT | BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START));
+    u8 key = CHEAT_OTHER;
     if (!face || cheatUnlocked) return;
-    if (face == cheatCode[cheatProgress]) {
-        if (++cheatProgress == 10) {
-            cheatUnlocked = 1;
-            cheatProgress = 0;
-            draw_level_select();
-            XGM_startPlayPCM(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
-        }
-    } else {
-        /* A wrong press restarts the code, but may itself be its first UP. */
-        cheatProgress = (face == cheatCode[0]) ? 1 : 0;
+    if (face == BUTTON_UP) key = CHEAT_UP;
+    else if (face == BUTTON_DOWN) key = CHEAT_DOWN;
+    else if (face == BUTTON_LEFT) key = CHEAT_LEFT;
+    else if (face == BUTTON_RIGHT) key = CHEAT_RIGHT;
+    else if (face == BUTTON_B) key = CHEAT_B;
+    else if (face == BUTTON_A) key = CHEAT_A;
+    if (stage_cheat_step(&cheatProgress, key)) {
+        cheatUnlocked = 1;
+        draw_level_select();
+        jj1_sfx_start(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
     }
 }
 
 static void show_title(void)
 {
-    VDP_clearPlane(BG_A, TRUE);
-    VDP_clearPlane(BG_B, TRUE);
-    VDP_setWindowFullScreen();
-    VDP_clearPlane(WINDOW, TRUE);
+    jj1_show_original_title();
     VDP_setTextPlane(WINDOW);
-    VDP_drawTextBG(WINDOW, "JAZZ JACKRABBIT", 12, 6);
-    VDP_drawTextBG(WINDOW, "SEGA GENESIS PORT", 11, 8);
-    {
-        /* Name the episode and the worlds it visits. */
-        const char *ep = JJ1_EPISODE_TITLE;
-        const char *worlds = JJ1_EPISODE_WORLDS;
-        u16 len = 0;
-        while (ep[len]) len++;
-        VDP_drawTextBG(WINDOW, ep, (u16)(20 - (len >> 1)), 11);
-        len = 0;
-        while (worlds[len]) len++;
-        if (len < 38) VDP_drawTextBG(WINDOW, worlds, (u16)(20 - (len >> 1)), 13);
-    }
-    VDP_drawTextBG(WINDOW, "PRESS START", 14, 17);
-    VDP_drawTextBG(WINDOW, "D-PAD RUN  A FIRE  C WEAPON", 6, 21);
-    VDP_drawTextBG(WINDOW, "B OR C JUMP  START PAUSE", 7, 23);
     draw_level_select();
-    VDP_clearSprites();
+    titlePreviousPad = JOY_readJoypad(JOY_1);
     play_music(jj1_music_menu);
     mode = MODE_TITLE;
+}
+
+static void show_main_menu(void)
+{
+    menuOption = 0;
+    jj1_show_original_menu(menuOption);
+    VDP_setTextPlane(WINDOW);
+    mode = MODE_MENU;
+    titlePreviousPad = JOY_readJoypad(JOY_1);
+    draw_level_select();
+    play_music(jj1_music_menu);
+}
+
+static void restore_main_menu(void)
+{
+    load_video_assets();
+    jj1_show_original_menu(menuOption);
+    VDP_setTextPlane(WINDOW);
+    if (cheatUnlocked) draw_level_select();
+    titlePreviousPad = JOY_readJoypad(JOY_1);
+    mode = MODE_MENU;
+}
+
+/* These are Genesis-specific interfaces, not imitations of the DOS setup. */
+static void plain_menu_setup(void)
+{
+    load_video_assets();
+    VDP_setEnable(FALSE);
+    VDP_clearSprites(); VDP_updateSprites(1, DMA);
+    VDP_clearPlane(BG_A, TRUE); VDP_clearPlane(BG_B, TRUE);
+    VDP_clearPlane(WINDOW, TRUE); VDP_setWindowFullScreen();
+    VDP_setTextPlane(WINDOW); VDP_setTextPalette(PAL0);
+    VDP_setHorizontalScroll(BG_A, 0); VDP_setHorizontalScroll(BG_B, 0);
+    VDP_setVerticalScroll(BG_A, 0); VDP_setVerticalScroll(BG_B, 0);
+    VDP_setEnable(TRUE);
+}
+
+static u8 slot_menu(u8 saving)
+{
+    u8 selected = 0, valid[JJ1_SAVE_SLOTS], i, redraw = 1, message = 0;
+    u16 previous = JOY_readJoypad(JOY_1);
+    plain_menu_setup();
+    for (i = 0; i < JJ1_SAVE_SLOTS; i++) valid[i] = jj1_save_valid(i);
+    while (TRUE) {
+        u16 pad, pressed;
+        if (redraw) {
+            VDP_clearPlane(WINDOW, TRUE);
+            VDP_drawTextBG(WINDOW, saving ? "SAVE GAME" : "LOAD GAME", 15, 4);
+            for (i=0;i<JJ1_SAVE_SLOTS;i++) {
+                char line[25]; const char *label=valid[i] ? "   SAVED" : "   EMPTY";
+                u8 j=0; line[j++]=i==selected ? 'X' : ' '; line[j++]=' ';
+                line[j++]='S'; line[j++]='L'; line[j++]='O'; line[j++]='T';
+                line[j++]=' '; line[j++]=(char)('1'+i);
+                while (*label) line[j++]=*label++;
+                line[j]=0;
+                VDP_drawTextBG(WINDOW,line,11,8+i*2);
+            }
+            if (message) VDP_drawTextBG(WINDOW, saving ? "SAVE FAILED" : "SLOT IS EMPTY", 12, 19);
+            VDP_drawTextBG(WINDOW,"UP/DOWN CHOOSE  A/START SELECT",5,23);
+            VDP_drawTextBG(WINDOW,"B/C BACK",16,25);
+            redraw=0;
+        }
+        SYS_doVBlankProcess(); pad=JOY_readJoypad(JOY_1); pressed=pad & ~previous; previous=pad;
+        if (pressed & (BUTTON_B | BUTTON_C)) return 0;
+        if (pressed & BUTTON_UP) { selected=(u8)((selected+3)%4); redraw=1; message=0; }
+        if (pressed & BUTTON_DOWN) { selected=(u8)((selected+1)%4); redraw=1; message=0; }
+        if (pressed & (BUTTON_A | BUTTON_START)) {
+            if (saving ? jj1_save_write(selected,&game) : (valid[selected] && jj1_save_read(selected,&game))) return 1;
+            message=1; redraw=1;
+        }
+    }
+}
+
+static void setup_menu(void)
+{
+    u8 selected=0, redraw=1; u16 previous=JOY_readJoypad(JOY_1);
+    static const char *const controls[] = {"A FIRE  B JUMP  C WPN", "B FIRE  A JUMP  C WPN", "C FIRE  B JUMP  A WPN"};
+    plain_menu_setup();
+    while (TRUE) {
+        u16 pad, pressed;
+        if (redraw) {
+            VDP_clearPlane(WINDOW,TRUE);
+            VDP_drawTextBG(WINDOW,"SETUP OPTIONS",13,4);
+            VDP_drawTextBG(WINDOW,selected==0?"X MUSIC":"  MUSIC",5,8);
+            VDP_drawTextBG(WINDOW,jj1_music_enabled?"ON ":"OFF",25,8);
+            VDP_drawTextBG(WINDOW,selected==1?"X SOUND EFFECTS":"  SOUND EFFECTS",5,11);
+            VDP_drawTextBG(WINDOW,jj1_sfx_enabled?"ON ":"OFF",25,11);
+            VDP_drawTextBG(WINDOW,selected==2?"X CONTROLS":"  CONTROLS",5,14);
+            VDP_drawTextBG(WINDOW,controls[jj1_controls],8,16);
+            VDP_drawTextBG(WINDOW,"UP/DOWN CHOOSE  LEFT/RIGHT CHANGE",3,22);
+            VDP_drawTextBG(WINDOW,"A/START CHANGE    B/C BACK",7,24);
+            redraw=0;
+        }
+        SYS_doVBlankProcess(); pad=JOY_readJoypad(JOY_1); pressed=pad & ~previous; previous=pad;
+        if (pressed & (BUTTON_B|BUTTON_C)) break;
+        if (pressed & BUTTON_UP) { selected=(u8)((selected+2)%3); redraw=1; }
+        if (pressed & BUTTON_DOWN) { selected=(u8)((selected+1)%3); redraw=1; }
+        if (pressed & (BUTTON_LEFT|BUTTON_RIGHT|BUTTON_A|BUTTON_START)) {
+            if (selected==0) {
+                jj1_music_enabled ^= 1; XGM_stopPlay(); playingMusic=0;
+                if (jj1_music_enabled) play_music(jj1_music_menu);
+            } else if (selected==1) {
+                jj1_sfx_enabled ^= 1;
+                if (!jj1_sfx_enabled) { XGM_stopPlayPCM(SOUND_PCM_CH2); XGM_stopPlayPCM(SOUND_PCM_CH3); XGM_stopPlayPCM(SOUND_PCM_CH4); }
+            } else jj1_controls=(u8)((jj1_controls + ((pressed & BUTTON_LEFT)?2:1))%3);
+            jj1_options_save(); redraw=1;
+        }
+    }
+}
+
+static void restore_paused_game(void)
+{
+    load_video_assets(); VDP_clearPlane(WINDOW,TRUE); VDP_setWindowOnTop(2);
+    hud_invalidate(); render_backdrop(game.stage); render_level_map();
+    cameraX = game.player.x > 150 ? game.player.x - 150 : 0;
+    cameraY = game.player.y > 96 ? game.player.y - 96 : 0;
+    update_camera_and_map(); renderedStage=game.stage; renderedDestroyCount=game.destroyCount;
+    reset_sprite_slots(); draw_status_line(&game); render_sprites();
+    playPreviousPad=JOY_readJoypad(JOY_1); game.previousInput=input_from_pad(playPreviousPad);
+}
+
+static void select_main_menu(void)
+{
+    if (menuOption == 0) { begin_play(0); return; }
+    if (menuOption == 5) { show_title(); return; }
+    if (menuOption == 1) {
+        if (slot_menu(0)) { begin_play(1); return; }
+        restore_main_menu(); return;
+    }
+    if (menuOption == 3) { setup_menu(); restore_main_menu(); return; }
+    if (menuOption == 2 || menuOption == 4) {
+        jj1_play_info_pages(menuOption == 4);
+        restore_main_menu();
+        return;
+    }
 }
 
 static void show_end(const char *title, const char *message)
@@ -1014,14 +1137,37 @@ static void show_end(const char *title, const char *message)
 
 static void run_play_frame(u16 input)
 {
+    u8 completingLevel = (game.transitionTimer == 1 && !game.paused);
     lastInput = input;
     jazz_step(&game, input);
+    if (completingLevel && !game.transitionTimer && !game.paused) {
+        if (renderedStage < JAZZ_STAGE_COUNT && stage_has_clear_scene[renderedStage]) {
+            jj1_play_level_clear(jj1_music_endlevel);
+            playingMusic = 0;
+            load_video_assets();
+            VDP_setWindowOnTop(2);
+            hud_invalidate();
+            reset_sprite_slots();
+        }
+    }
     if (game.bonusPending && (renderedStage < JAZZ_STAGE_COUNT)) {
         run_bonus(stageBonus[renderedStage]);
         game.bonusPending = 0;
         renderedStage = 0xFF;   /* force the stage to be redrawn below */
     }
+    if (completingLevel && !game.transitionTimer && !game.paused) renderedStage = 0xFF;
     if (game.stage != renderedStage) {
+        u16 oldPlanet = approachedPlanet;
+        if (!game.finished) approachedPlanet = jj1_play_planet(game.stage, approachedPlanet);
+        if (approachedPlanet != oldPlanet) {
+            playingMusic = 0;
+            load_video_assets();
+            VDP_setWindowOnTop(2);
+            hud_invalidate();
+            reset_sprite_slots();
+            /* Consume START/B used to skip the approach, rather than pausing. */
+            game.previousInput = input_from_pad(JOY_readJoypad(JOY_1));
+        }
         render_backdrop(game.stage);
         render_level_map();
         renderedStage = game.stage;
@@ -1035,8 +1181,15 @@ static void run_play_frame(u16 input)
     render_sprites();
     update_sfx();
     if (game.finished) {
-        mode = (game.lives ? MODE_COMPLETE : MODE_GAMEOVER);
-        show_end((mode == MODE_COMPLETE) ? "EPISODE COMPLETE" : "GAME OVER", (mode == MODE_COMPLETE) ? "CARROT KINGDOM IS SAFE" : "TRY AGAIN, JAZZ!");
+        if (game.lives) {
+            jj1_play_episode_ending(jj1_music_bonus);
+            playingMusic = 0;
+            load_video_assets();
+            show_title();
+        } else {
+            mode = MODE_GAMEOVER;
+            show_end("GAME OVER", "TRY AGAIN, JAZZ!");
+        }
     }
 }
 
@@ -1079,6 +1232,16 @@ int main(bool hardReset)
     SRAM_writeByte(4, 0); SRAM_disable();
 #endif
     load_video_assets();
+#ifdef JAZZ_SFX_TEST
+    /* Isolated emulator probe; JAZZ_SFX_TEST is the JAZZ_SHOT_* index.
+     * The release always enters the normal game path instead. */
+    XGM_stopPlay();
+    for (u16 f = 0; f < 60; f++) SYS_doVBlankProcess();
+    game.player.shotType = JAZZ_SFX_TEST;
+    game.events = JAZZ_EVENT_FIRE;
+    update_sfx();
+    while (TRUE) SYS_doVBlankProcess();
+#endif
 #ifdef JAZZ_AUTOTEST
     if (run_target_point_to_point_tests()) {
         /* A deterministic SRAM marker lets the external emulator runner
@@ -1098,7 +1261,49 @@ int main(bool hardReset)
     while (TRUE) SYS_doVBlankProcess();
 #else
     JOY_init();
+    jj1_options_load();
+#ifdef JAZZ_SCENE_TEST
+    /* Dedicated integration-test ROM; never enabled in release builds. */
+    jj1_play_level_clear(jj1_music_endlevel);
+    jj1_play_bonus_clear(jj1_music_endlevel);
+    load_video_assets();
+    playingMusic = 0;
+#endif
+#ifdef JAZZ_PLANET_TEST
+    approachedPlanet = jj1_play_planet(JAZZ_PLANET_TEST, 0xFFFF);
+    approachedPlanet = jj1_play_planet(JAZZ_PLANET_TEST, approachedPlanet);
+    playingMusic = 0;
+    load_video_assets();
     show_title();
+#elif defined(JAZZ_EPISODE_FLOW_TEST)
+    begin_play(0);
+    jazz_debug_set_stage(&game, JAZZ_STAGE_COUNT - 1);
+    renderedStage = JAZZ_STAGE_COUNT - 1;
+    game.transitionTimer = 1;
+#elif defined(JAZZ_BONUS_END_TEST)
+    jazz_game_init(&game);
+    run_bonus(0);
+    playingMusic = 0;
+    load_video_assets();
+    show_title();
+#elif defined(JAZZ_ENDING_TEST)
+    jj1_play_episode_ending(jj1_music_bonus);
+    playingMusic = 0;
+    load_video_assets();
+    show_title();
+#elif defined(JAZZ_SCENE_FLOW_TEST)
+    /* Exercise the real gameplay -> transition -> gameplay path in the
+     * emulator without requiring an entire manual level playthrough. */
+    begin_play(0);
+    jazz_debug_set_stage(&game, 1);  /* LEVEL1.000 requests ENDLEVEL.0SC */
+    renderedStage = 1;
+    game.transitionTimer = 1;
+#else
+#ifndef JAZZ_SCENE_TEST
+    jj1_play_startup();
+#endif
+    show_title();
+#endif
     while (TRUE) {
         pad = JOY_readJoypad(JOY_1);
         if (mode == MODE_TITLE) {
@@ -1115,9 +1320,32 @@ int main(bool hardReset)
                 cheat_feed(pressed);
             }
             titlePreviousPad = pad;
-            if (pad & BUTTON_START) begin_play();
+            if (pressed & BUTTON_START) show_main_menu();
+        } else if (mode == MODE_MENU) {
+            u16 pressed = (u16)(pad & ~titlePreviousPad);
+            if (!cheatUnlocked) cheat_feed(pressed);
+            if (pressed & (BUTTON_UP | BUTTON_DOWN)) {
+                if (pressed & BUTTON_UP) menuOption = (u8)((menuOption + 5) % 6);
+                else menuOption = (u8)((menuOption + 1) % 6);
+                jj1_set_menu_option(menuOption);
+                VDP_clearPlane(WINDOW, TRUE);
+                if (cheatUnlocked) draw_level_select();
+                else VDP_setWindowOnTop(0);
+            }
+            if (cheatUnlocked) {
+                if ((pressed & BUTTON_RIGHT) && selectedStage + 1 < JAZZ_STAGE_COUNT + BONUS_LEVELS) {
+                    selectedStage++; draw_level_select();
+                } else if ((pressed & BUTTON_LEFT) && selectedStage) {
+                    selectedStage--; draw_level_select();
+                }
+            }
+            titlePreviousPad = pad;
+            if (pressed & BUTTON_START) select_main_menu();
+            else if (pressed & BUTTON_C) show_title();
         } else if (mode == MODE_PLAY) {
-            run_play_frame(input_from_pad(pad));
+            if (game.paused && (pad & BUTTON_C) && !(playPreviousPad & BUTTON_C)) {
+                slot_menu(1); restore_paused_game();
+            } else { playPreviousPad=pad; run_play_frame(input_from_pad(pad)); }
         } else if (pad & BUTTON_START) {
             show_title();
         }

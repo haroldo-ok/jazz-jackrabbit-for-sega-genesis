@@ -38,3 +38,19 @@ python3 "$ROOT/tests/test_sprite_extraction.py"
   "$ROOT/tests/host_data.c" "$ROOT/tests/test_bonus_link.c" \
   -o "$ROOT/tests/.tmp/bonus_link_test"
 "$ROOT/tests/.tmp/bonus_link_test"
+
+# Secret button sequence, overlap recovery and rejected simultaneous inputs.
+"$CC_BIN" -std=c99 -Wall -Wextra -Werror -I"$ROOT/inc" \
+  "$ROOT/tests/test_stage_cheat.c" -o "$ROOT/tests/.tmp/stage_cheat_test"
+"$ROOT/tests/.tmp/stage_cheat_test"
+python3 "$ROOT/tests/test_bonus_sprite_decode.py"
+python3 "$ROOT/tests/test_scene_decode.py"
+
+# Weapon IDs, declared XGM resources, and original PCM/data when supplied.
+"$CC_BIN" -std=c99 -Wall -Wextra -Werror -I"$ROOT/inc" \
+  "$ROOT/tests/test_shot_sfx.c" -o "$ROOT/tests/.tmp/shot_sfx_test"
+"$ROOT/tests/.tmp/shot_sfx_test"
+python3 "$ROOT/tests/test_shot_sounds.py"
+python3 "$ROOT/tests/test_presentation_assets.py"
+
+python3 "$ROOT/tests/test_menu_assets.py"
