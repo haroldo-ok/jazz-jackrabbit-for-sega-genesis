@@ -209,6 +209,7 @@ static void build_stage(JazzGame *g, u8 stage)
     g->paused = 0;
     g->transitionTimer = 0;
     g->stageGems = 0;
+    g->bonusGem = 0;
     g->stageGemTotal = 0;
     g->player.x = 32;
     g->player.y = (13 << 4) - PLAYER_H;
@@ -873,6 +874,9 @@ static void grant_item(JazzGame *g, const Jj1EventInfo *info, u8 gridX, u8 gridY
     g->score += (u16)info->points * 25;
     g->events |= JAZZ_EVENT_GEM;
     switch (kind) {
+    case JJ1_ITEM_DIAMOND:
+        g->bonusGem = 1;
+        break;
     case JJ1_ITEM_HEALTH:
         if (g->health < 5) g->health++;
         g->events |= JAZZ_EVENT_HEALTH;
@@ -1339,6 +1343,7 @@ void jazz_step(JazzGame *g, u16 input)
     u16 pressed = input & ~g->previousInput;
     s8 dx, dy;
     g->events = JAZZ_EVENT_NONE;
+    g->bonusPending = 0;
     g->frame++;
 
     if (pressed & JAZZ_INPUT_START) { g->previousInput = input; g->paused = !g->paused; return; }
@@ -1348,8 +1353,10 @@ void jazz_step(JazzGame *g, u16 input)
         g->previousInput = input;
         g->transitionTimer--;
         if (!g->transitionTimer) {
+            u8 pend = g->bonusGem;   /* the diamond opens the bonus level */
             if ((u8)(g->stage + 1) < JAZZ_STAGE_COUNT) build_stage(g, g->stage + 1);
             else g->finished = 1;
+            g->bonusPending = pend;
         }
         return;
     }
@@ -1433,7 +1440,7 @@ void jazz_step(JazzGame *g, u16 input)
              * player top therefore targets PLAYER_H higher), and the ascent
              * proceeds regardless of the jump button. */
             g->player.jumpTargetY = springTop - (s16)height - PLAYER_H;
-            g->player.springJump = 1;
+            g->player.springJump = 1; g->events |= JAZZ_EVENT_SPRING;
             g->player.vy = JAZZ_PYS_JUMP;
             g->player.onGround = 0;
             g->events |= JAZZ_EVENT_JUMP;

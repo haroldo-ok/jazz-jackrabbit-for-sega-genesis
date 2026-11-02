@@ -5,11 +5,24 @@
 #include "jj1_runtime.h"
 #include "jj1_sounds.h"
 #include "jj1_music.h"
+#include "jj1_font.h"
+#include "bonus_view.h"
 
 /* XGM PCM sample IDs (user range 64+); channel 1 stays with the music. */
 #define JJ1_SFX_FIRE   64
 #define JJ1_SFX_JUMP   65
 #define JJ1_SFX_PICKUP 66
+#define JJ1_SFX_BOOM   67
+#define JJ1_SFX_OW     68
+#define JJ1_SFX_ONEUP  69
+#define JJ1_SFX_YEAHOO 70
+#define JJ1_SFX_FLAME  71
+#define JJ1_SFX_PHOTON 72
+#define JJ1_SFX_SPRING 73
+#define JJ1_SFX_INVULN 74
+#define JJ1_SFX_BIRDY  75
+#define JJ1_SFX_ROCKET 76
+#define JJ1_SFX_GODLIKE 77
 
 #define SCREEN_W 320
 #define PLAYER_W 14
@@ -30,9 +43,28 @@ static u16 playerSlotFrame;
 static u16 boardSlotKey;
 static u16 bossGunArt;
 static u16 lastInput;
+/* Which bonus level follows each stage: the bonus file belongs to the stage's
+ * world (shareware: worlds 000, 001, 002 -> BONUSMAP.000/001/002). */
+#define JJ1_BONUS_FOR_000 0
+#define JJ1_BONUS_FOR_001 1
+#define JJ1_BONUS_FOR_002 2
+#define JJ1_BONUS_FOR_003 0
+#define JJ1_BONUS_FOR_004 1
+#define JJ1_BONUS_FOR_005 2
+#define JJ1_BONUS_FOR_006 0
+#define JJ1_BONUS_FOR_007 1
+#define JJ1_BONUS_FOR_008 2
+#define JJ1_BONUS_FOR_018 2
+#define STAGE(n, world) JJ1_BONUS_FOR_##world
+static const u8 stageBonus[JAZZ_STAGE_COUNT] = {
+#include "jj1_episode_stages.inc"
+};
+#undef STAGE
+
 static u8 selectedStage;   /* level select on the title screen */
+static u8 cheatUnlocked = 1;   /* stage select is always on (the pad code below still works if this is cleared) */
+static u8 cheatProgress;   /* how many pad-code steps have been matched */
 static u16 titlePreviousPad;
-static u8 sfxTimer;
 
 
 static u16 input_from_pad(u16 pad)
@@ -340,7 +372,9 @@ static void load_video_assets(void)
     }
     VDP_loadTileData(jazz_bullet_tile, T_BULLET, 1, DMA);
     VDP_loadTileData(jj1_sky_tiles, T_JJ1_SKY, 8, DMA);
-    PAL_setPalette(PAL0, jazz_pal0, DMA);
+    /* The game's own FONT2.0FN glyphs and their palette. */
+    VDP_loadFont(&jj1_font, DMA);
+    PAL_setPalette(PAL0, jj1_font_pal.data, DMA);
     PAL_setPalette(PAL3, jj1_sky_palette, DMA);
     VDP_setBackgroundColor(0);
     VDP_setTextPalette(PAL0);
@@ -352,6 +386,17 @@ static void load_video_assets(void)
     XGM_setPCM(JJ1_SFX_FIRE, jj1_fire, sizeof(jj1_fire));
     XGM_setPCM(JJ1_SFX_JUMP, jj1_jump, sizeof(jj1_jump));
     XGM_setPCM(JJ1_SFX_PICKUP, jj1_pickup, sizeof(jj1_pickup));
+    XGM_setPCM(JJ1_SFX_BOOM, jj1_boom, sizeof(jj1_boom));
+    XGM_setPCM(JJ1_SFX_OW, jj1_ow, sizeof(jj1_ow));
+    XGM_setPCM(JJ1_SFX_ONEUP, jj1_oneup, sizeof(jj1_oneup));
+    XGM_setPCM(JJ1_SFX_YEAHOO, jj1_yeahoo, sizeof(jj1_yeahoo));
+    XGM_setPCM(JJ1_SFX_FLAME, jj1_flame, sizeof(jj1_flame));
+    XGM_setPCM(JJ1_SFX_PHOTON, jj1_photon, sizeof(jj1_photon));
+    XGM_setPCM(JJ1_SFX_SPRING, jj1_spring, sizeof(jj1_spring));
+    XGM_setPCM(JJ1_SFX_INVULN, jj1_invuln, sizeof(jj1_invuln));
+    XGM_setPCM(JJ1_SFX_BIRDY, jj1_birdy, sizeof(jj1_birdy));
+    XGM_setPCM(JJ1_SFX_ROCKET, jj1_rocket, sizeof(jj1_rocket));
+    XGM_setPCM(JJ1_SFX_GODLIKE, jj1_godlike, sizeof(jj1_godlike));
 }
 
 /* Follow the player with lag proportional to the distance, as the original
@@ -794,31 +839,81 @@ static void render_sprites(void)
     } else VDP_clearSprites();
 }
 
+static u8 prevShield, prevBird;
+
 static void update_sfx(void)
 {
+    /* Power-up pickups: sound on the frame they switch on. */
+    if (game.player.shield && !prevShield) XGM_startPlayPCM(JJ1_SFX_INVULN, 2, SOUND_PCM_CH4);
+    if (game.player.bird && !prevBird) XGM_startPlayPCM(JJ1_SFX_BIRDY, 2, SOUND_PCM_CH4);
+    prevShield = game.player.shield ? 1 : 0;
+    prevBird = game.player.bird ? 1 : 0;
+
     /* Original JJ1 SOUNDS.000 clips, locally converted to signed PCM by the
        importer.  They play through the XGM driver's PCM channels (2-4) so the
        music, which owns channel 1, keeps going underneath.  The XGM sample
        table was primed once in load_video_assets(). */
-    if (game.events & JAZZ_EVENT_FIRE)
-        XGM_startPlayPCM(JJ1_SFX_FIRE, 1, SOUND_PCM_CH2);
+    /* Priority order: one effect per channel, most important wins. */
+    if (game.events & JAZZ_EVENT_HURT)
+        XGM_startPlayPCM(JJ1_SFX_OW, 2, SOUND_PCM_CH2);
+    else if (game.events & JAZZ_EVENT_KILL)
+        XGM_startPlayPCM(JJ1_SFX_BOOM, 2, SOUND_PCM_CH2);
+    else if (game.events & JAZZ_EVENT_FIRE) {
+        u8 id = JJ1_SFX_FIRE;
+        if (game.player.shotType == JAZZ_SHOT_TOASTER) id = JJ1_SFX_FLAME;
+        else if (game.player.shotType == JAZZ_SHOT_SPECIAL) id = JJ1_SFX_ROCKET;
+        else if (game.player.shotType >= JAZZ_SHOT_UPWARD) id = JJ1_SFX_PHOTON;
+        XGM_startPlayPCM(id, 1, SOUND_PCM_CH2);
+    }
+    if (game.events & JAZZ_EVENT_EXIT)
+        XGM_startPlayPCM(JJ1_SFX_YEAHOO, 3, SOUND_PCM_CH3);
+    else if (game.events & JAZZ_EVENT_SPRING)
+        XGM_startPlayPCM(JJ1_SFX_SPRING, 1, SOUND_PCM_CH3);
     else if (game.events & JAZZ_EVENT_JUMP)
         XGM_startPlayPCM(JJ1_SFX_JUMP, 1, SOUND_PCM_CH3);
-    else if (game.events & JAZZ_EVENT_GEM)
+    if (game.events & JAZZ_EVENT_LIFE)
+        XGM_startPlayPCM(JJ1_SFX_ONEUP, 3, SOUND_PCM_CH4);
+    else if (game.events & (JAZZ_EVENT_GEM | JAZZ_EVENT_HEALTH))
         XGM_startPlayPCM(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
+}
 
-    if (sfxTimer) {
-        sfxTimer--;
-        if (!sfxTimer) PSG_setEnvelope(0, PSG_ENVELOPE_MIN);
-    }
-    if (game.events & JAZZ_EVENT_HURT) { PSG_setFrequency(0, 500); PSG_setEnvelope(0, 2); sfxTimer = 7; }
+static void show_title(void);
+
+static void reset_sprite_slots(void)
+{
+    u8 sl;
+    for (sl = 0; sl < JAZZ_MAX_ENEMIES; sl++) enemySlotArt[sl] = 0xFFFF;
+    playerSlotFrame = 0xFFFF;
+    boardSlotKey = 0xFFFF;
+    bossGunArt = 0xFFFF;
+}
+
+/* Plays a bonus level and returns BONUS_WON / BONUS_LOST.  Winning grants a
+ * life, as in the original.  The caller rebuilds the screen afterwards. */
+static int run_bonus(u8 index)
+{
+    int r = bonus_play(index, jj1_music_bonus);
+    playingMusic = 0;           /* the stage music must restart */
+    if ((r == BONUS_WON) && (game.lives < 9)) game.lives++;
+    VDP_setWindowOnTop(2);
+    VDP_clearPlane(WINDOW, TRUE);
+    hud_invalidate();
+    reset_sprite_slots();
+    return r;
 }
 
 static void begin_play(void)
 {
+    if (cheatUnlocked && (selectedStage >= JAZZ_STAGE_COUNT)) {
+        /* Stage-select cheat: the BONUS entries start a bonus level directly. */
+        jazz_game_init(&game);
+        run_bonus((u8)(selectedStage - JAZZ_STAGE_COUNT));
+        show_title();
+        return;
+    }
     jazz_game_init(&game);
     /* Level select: start on the stage chosen on the title screen. */
-    if (selectedStage) jazz_debug_set_stage(&game, selectedStage);
+    if (cheatUnlocked && selectedStage) jazz_debug_set_stage(&game, selectedStage);
     game.previousInput = JAZZ_INPUT_START;
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
@@ -834,19 +929,48 @@ static void begin_play(void)
     mode = MODE_PLAY;
 }
 
-/* Level select: UP/DOWN on the title screen pick the starting stage, which
- * makes it possible to debug a later level without playing through to it. */
+/* Stage-select cheat.  Enter the pad code on the title screen
+ *   UP UP DOWN DOWN LEFT RIGHT LEFT RIGHT B A
+ * to unlock it; afterwards UP/DOWN on the title screen choose the stage that
+ * START begins on.  Once unlocked it stays on until the console is reset. */
+static const u16 cheatCode[10] = {
+    BUTTON_UP, BUTTON_UP, BUTTON_DOWN, BUTTON_DOWN,
+    BUTTON_LEFT, BUTTON_RIGHT, BUTTON_LEFT, BUTTON_RIGHT,
+    BUTTON_B, BUTTON_A
+};
+
 static void draw_level_select(void)
 {
-    char line[24];
-    /*                 0123456789..           digit sits at index 11 */
-    const char *label = "LEVEL:  <  1  >   ";
+    char line[28];
+    /*                  0123456789012345678901234     digit at index 17 */
+    const char *stageLabel = "STAGE SELECT:  <  1  >    ";
+    const char *bonusLabel = "BONUS SELECT:  <  1  >    ";
+    const char *label = (selectedStage >= JAZZ_STAGE_COUNT) ? bonusLabel : stageLabel;
     u8 i;
+    if (!cheatUnlocked) return;   /* show_title() already blanked the plane */
     for (i = 0; label[i]; i++) line[i] = label[i];
-    line[11] = (char)('1' + selectedStage);
+    line[17] = (char)('1' + ((selectedStage >= JAZZ_STAGE_COUNT) ? (selectedStage - JAZZ_STAGE_COUNT) : selectedStage));
     line[i] = 0;
-    VDP_drawTextBG(WINDOW, line, 11, 16);
-    VDP_drawTextBG(WINDOW, "UP/DOWN: SELECT LEVEL", 9, 19);
+    VDP_drawTextBG(WINDOW, line, 7, 19);
+}
+
+/* Feed one newly pressed button set into the cheat-code matcher. */
+static void cheat_feed(u16 pressed)
+{
+    u16 face = (u16)(pressed & (BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT |
+                                BUTTON_RIGHT | BUTTON_A | BUTTON_B | BUTTON_C));
+    if (!face || cheatUnlocked) return;
+    if (face == cheatCode[cheatProgress]) {
+        if (++cheatProgress == 10) {
+            cheatUnlocked = 1;
+            cheatProgress = 0;
+            draw_level_select();
+            XGM_startPlayPCM(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
+        }
+    } else {
+        /* A wrong press restarts the code, but may itself be its first UP. */
+        cheatProgress = (face == cheatCode[0]) ? 1 : 0;
+    }
 }
 
 static void show_title(void)
@@ -856,12 +980,10 @@ static void show_title(void)
     VDP_setWindowFullScreen();
     VDP_clearPlane(WINDOW, TRUE);
     VDP_setTextPlane(WINDOW);
-    VDP_drawTextBG(WINDOW, "JAZZ JACKRABBIT", 11, 7);
-    VDP_drawTextBG(WINDOW, "GENESIS HOME PORT", 10, 9);
-    VDP_drawTextBG(WINDOW, "SGDK PLAYABLE PROTOTYPE", 7, 13);
+    VDP_drawTextBG(WINDOW, "JAZZ JACKRABBIT", 12, 6);
+    VDP_drawTextBG(WINDOW, "SEGA GENESIS PORT", 11, 8);
     {
-        /* Name the episode and the worlds it visits, so the per-episode ROMs
-           are told apart from the title screen alone. */
+        /* Name the episode and the worlds it visits. */
         const char *ep = JJ1_EPISODE_TITLE;
         const char *worlds = JJ1_EPISODE_WORLDS;
         u16 len = 0;
@@ -869,12 +991,11 @@ static void show_title(void)
         VDP_drawTextBG(WINDOW, ep, (u16)(20 - (len >> 1)), 11);
         len = 0;
         while (worlds[len]) len++;
-        if (len < 38) VDP_drawTextBG(WINDOW, worlds, (u16)(20 - (len >> 1)), 15);
+        if (len < 38) VDP_drawTextBG(WINDOW, worlds, (u16)(20 - (len >> 1)), 13);
     }
-    VDP_drawTextBG(WINDOW, "START: PLAY", 13, 18);
-    VDP_drawTextBG(WINDOW, "D-PAD RUN  A FIRE C WEAPON", 7, 21);
-    VDP_drawTextBG(WINDOW, "B OR C JUMP  START PAUSE", 6, 23);
-    VDP_drawTextBG(WINDOW, "JJ1 SHAREWARE ASSET BUILD", 7, 26);
+    VDP_drawTextBG(WINDOW, "PRESS START", 14, 17);
+    VDP_drawTextBG(WINDOW, "D-PAD RUN  A FIRE  C WEAPON", 6, 21);
+    VDP_drawTextBG(WINDOW, "B OR C JUMP  START PAUSE", 7, 23);
     draw_level_select();
     VDP_clearSprites();
     play_music(jj1_music_menu);
@@ -895,6 +1016,11 @@ static void run_play_frame(u16 input)
 {
     lastInput = input;
     jazz_step(&game, input);
+    if (game.bonusPending && (renderedStage < JAZZ_STAGE_COUNT)) {
+        run_bonus(stageBonus[renderedStage]);
+        game.bonusPending = 0;
+        renderedStage = 0xFF;   /* force the stage to be redrawn below */
+    }
     if (game.stage != renderedStage) {
         render_backdrop(game.stage);
         render_level_map();
@@ -977,12 +1103,16 @@ int main(bool hardReset)
         pad = JOY_readJoypad(JOY_1);
         if (mode == MODE_TITLE) {
             u16 pressed = (u16)(pad & ~titlePreviousPad);
-            if ((pressed & BUTTON_UP) && (selectedStage + 1 < JAZZ_STAGE_COUNT)) {
-                selectedStage++;
-                draw_level_select();
-            } else if ((pressed & BUTTON_DOWN) && selectedStage) {
-                selectedStage--;
-                draw_level_select();
+            if (cheatUnlocked) {
+                if ((pressed & BUTTON_UP) && (selectedStage + 1 < JAZZ_STAGE_COUNT + BONUS_LEVELS)) {
+                    selectedStage++;
+                    draw_level_select();
+                } else if ((pressed & BUTTON_DOWN) && selectedStage) {
+                    selectedStage--;
+                    draw_level_select();
+                }
+            } else {
+                cheat_feed(pressed);
             }
             titlePreviousPad = pad;
             if (pad & BUTTON_START) begin_play();

@@ -55,7 +55,8 @@ enum {
     JJ1_ITEM_SHIELD,         /* modifiers 33/36: absorbs 1 or 4 hits */
     JJ1_ITEM_HIGHJUMP,       /* modifier 5: high-jump feet */
     JJ1_ITEM_BIRD,           /* modifier 34: bird companion */
-    JJ1_ITEM_AIRBOARD        /* modifier 35: airboard flight */
+    JJ1_ITEM_AIRBOARD,       /* modifier 35: airboard flight */
+    JJ1_ITEM_DIAMOND         /* modifier 37: bonus diamond (unlocks the bonus level) */
 };
 
 typedef struct {

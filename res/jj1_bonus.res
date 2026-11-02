@@ -1,0 +1,10 @@
+// Converted from the supplied JJ1 bonus files by tools/build_sgdk_bonus.py
+BIN jj1_bonus_tiles   "bonus/tiles.bin"
+BIN jj1_bonus_masks   "bonus/masks.bin"
+BIN jj1_bonus_bg      "bonus/bg.bin"
+BIN jj1_bonus_grid0   "bonus/grid0.bin"
+BIN jj1_bonus_grid1   "bonus/grid1.bin"
+BIN jj1_bonus_grid2   "bonus/grid2.bin"
+BIN jj1_bonus_events0 "bonus/events0.bin"
+BIN jj1_bonus_events1 "bonus/events1.bin"
+BIN jj1_bonus_events2 "bonus/events2.bin"

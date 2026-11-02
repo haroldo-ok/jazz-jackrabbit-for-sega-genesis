@@ -34,11 +34,17 @@ Repeat per level. `src/jj1_eventset.c` picks up `jj1_levelN_eventset.inc` files 
 | B or C | Jump |
 | Start | Start game / pause / resume |
 
-## Build
+### Bonus levels
 
-### Official SGDK
+Finish a stage while holding the **bonus diamond** and that world's bonus level starts: D-pad up/down walk, left/right turn, **A** run, **B/C** jump. Collect all the gems before the clock runs out (hourglasses add a minute; the exit sign gives up). Winning grants an extra life. They are also in the stage-select list below as BONUS 1-3.
 
-Set `GDK` to the SGDK root and invoke the project makefile:
+### Stage select
+
+Stage select is always on. On the title screen press **UP/DOWN** to choose the starting stage (the list continues with BONUS 1-3), then **START**. It is enabled by `cheatUnlocked = 1` in `src/main.c`; set it to 0 to bring back the secret pad code (UP, UP, DOWN, DOWN, LEFT, RIGHT, LEFT, RIGHT, B, A) that unlocks it.
+
+### Official SGDK (2.x)
+
+The project now uses SGDK 2.x's `makefile.gen` (`src/rom_header.c` is the cartridge header). Set `GDK` to the SGDK root and invoke the project makefile:
 
 ```bash
 make GDK=/path/to/sgdk release
@@ -101,6 +107,18 @@ python3 tools/build_sgdk_jj1_level_screen.py \
 ```
 
 The catalog command converts **every available** `BLOCKS.*` set, `SPRITES.*` set, `LEVEL*.*` map, `MENU.000` background/highlight, `PANEL.000` preview, `.0FN` font atlas, and the `SOUNDS.000` clip catalog into PNG/WAV/JSON intermediates. The visual script creates the resident eight-frame Jazz pack. The level-data script creates all 240 block patterns plus a complete 256×64 map for the runtime cache; run it with a distinct symbol name/output for each shareware world. The level-screen script creates inspectable 40×28 map chunks. Do not commit a complete original installation or redistributed raw archive.
+
+## Bonus levels
+
+```bash
+python3 tools/build_sgdk_bonus.py --input ~/jazz/JAZZ    # writes res/bonus/*.bin and src/jj1_bonus_data.inc
+```
+
+## Font
+
+```bash
+python3 tools/build_sgdk_font.py --input ~/jazz/JAZZ/FONT2.0FN --output res/jj1_font.png
+```
 
 ## Project layout
 
