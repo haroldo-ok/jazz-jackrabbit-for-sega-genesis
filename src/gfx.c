@@ -8,8 +8,9 @@
 #include "jj1_episode_includes.inc"
 
 /* One entry per stage, in the order the episode's level chain runs. */
-#define STAGE(n, world) { \
-    jj1_world##world##_block_tiles, jj1_world##world##_palette, jj1_level##n##_blocks, \
+#define STAGE(n, world, mask) { \
+    jj1_world##world##_block_tiles, jj1_world##world##_palette, \
+    jj1_world##world##_cycles, JJ1_WORLD##world##_CYCLES, mask, jj1_level##n##_blocks, \
     jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_player_states, \
     jj1_level##n##_spring_tiles, \
     jj1_level##n##_event_sprite_tiles, jj1_level##n##_event_sprites, \
@@ -27,6 +28,7 @@
 const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT] = {
 #include "jj1_episode_stages.inc"
 };
+
 
 /* Original event sprites, when the importer has resolved them from the game
  * data (event -> animation -> sprite index -> SPRITES.<world>).  The ROM keeps

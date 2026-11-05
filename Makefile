@@ -56,4 +56,4 @@ endif
 # they exist before compiling C files, including on parallel clean builds.
 $(OUT)/src/main.o $(OUT)/src/bonus_view.o $(OUT)/src/jj1_scenes.o: \
   $(OUT)/res/jj1_sounds.o $(OUT)/res/jj1_music.o $(OUT)/res/jj1_font.o \
-  $(OUT)/res/jj1_bonus.o $(OUT)/res/jj1_scenes_res.o $(OUT)/res/jj1_menu_pages.o
+  $(OUT)/res/jj1_bonus.o $(OUT)/res/jj1_hud.o $(OUT)/res/jj1_scenes_res.o $(OUT)/res/jj1_menu_pages.o

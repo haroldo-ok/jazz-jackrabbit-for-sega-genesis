@@ -8,6 +8,7 @@
 #include "jj1_sounds.h"
 #include "jj1_music.h"
 #include "jj1_font.h"
+#include "jj1_hud.h"
 #include "bonus_view.h"
 #include "stage_cheat.h"
 #include "jj1_scenes.h"
@@ -45,12 +46,38 @@ static u16 lastInput;
 #define JJ1_BONUS_FOR_007 1
 #define JJ1_BONUS_FOR_008 2
 #define JJ1_BONUS_FOR_018 2
-#define STAGE(n, world) JJ1_BONUS_FOR_##world
+#define STAGE(n, world, mask) JJ1_BONUS_FOR_##world
 static const u8 stageBonus[JAZZ_STAGE_COUNT] = {
 #include "jj1_episode_stages.inc"
 };
 #undef STAGE
 
+#ifdef JAZZ_PROFILE
+static u32 profT[8];
+#define PROF(n, stmt) do { u32 t0 = getSubTick(); stmt; profT[n] += getSubTick() - t0; } while (0)
+#else
+#define PROF(n, stmt) stmt
+#endif
+
+/* Animation frame (game.frame / 8) mod n, and small products, with the
+ * 68000's 16-bit divide and multiply: written with int arithmetic GCC calls
+ * libgcc's 32-bit __modsi3 / __mulsi3 routines, several per sprite. */
+static inline u8 anim_frame(u8 n)
+{
+    u32 x = (u32)(game.frame >> 3);
+    if (n < 2) return 0;
+    __asm__("divu.w %1,%0" : "+d"(x) : "d"((u16)n));
+    return (u8)(x >> 16);
+}
+
+static inline u16 mul_u8(u8 a, u8 b)
+{
+    u32 r = a;
+    __asm__("mulu.w %1,%0" : "+d"(r) : "d"((u16)b));
+    return (u16)r;
+}
+
+static u16 itemSlotLoaded[JJ1_ITEM_SLOTS] = { 0xFFFF, 0xFFFF };
 static const u8 stage_has_clear_scene[JAZZ_STAGE_COUNT] = {
 #include "jj1_episode_end_scenes.inc"
 };
@@ -78,16 +105,6 @@ static u16 input_from_pad(u16 pad)
     return input;
 }
 
-static void number_to_text(char *out, u16 value)
-{
-    char reverse[6];
-    u8 count = 0;
-    u8 i;
-    if (!value) { out[0] = '0'; out[1] = 0; return; }
-    while (value && (count < 5)) { reverse[count++] = (char)('0' + (value % 10)); value /= 10; }
-    for (i = 0; i < count; i++) out[i] = reverse[count - 1 - i];
-    out[count] = 0;
-}
 
 /* The HUD lives on the window plane over the top two rows, and this runs
  * right after vblank - i.e. while the beam is drawing exactly those rows.
@@ -96,85 +113,97 @@ static void number_to_text(char *out, u16 value)
  * they were still blank and the HUD flickered out. So: never clear, build
  * fixed-width space-padded lines, and only touch VRAM when a line actually
  * changes (score/gems/health move rarely, so the window is stable). */
-static char hudShown[2][41];
+/* The status panel: two rows of the window plane built from tiles cut out of
+ * PANEL.000 (tools/build_sgdk_panel.py).  The tiles live in the lowercase
+ * slots of the font (the text is all uppercase), so they cost no extra VRAM.
+ * The panel palette keeps colour 1 = black and 15 = white, so the 8x8 font
+ * still draws weapon and message text on top of it. */
+#define HUD_BASE   (TILE_FONT_INDEX + 65)
+#define HUD_PLATE  0
+#define HUD_BLACK  1
+#define HUD_DIGIT0 2
+#define HUD_HEART_FULL  12
+#define HUD_HEART_EMPTY 13
+#define HUD_LIVES  14
+#define HUD_PLANET 18
+#define HUD_ATTR(i) TILE_ATTR_FULL(PAL0, 1, 0, 0, HUD_BASE + (i))
 
-static void hud_pad(char *line, u8 pos)
+static u16 hudMap[80];
+static u32 hudKey = 0xFFFFFFFFUL;
+
+static void hud_enter(void)
 {
-    while (pos < 40) line[pos++] = ' ';
-    line[40] = 0;
+    VDP_loadTileData(jj1_hud.tiles, HUD_BASE, 22, DMA);
+    PAL_setPalette(PAL0, jj1_hud_pal.data, DMA);
+    hudKey = 0xFFFFFFFFUL;
 }
 
-static void hud_commit(u8 row, const char *line)
+static void hud_leave(void)
+{
+    PAL_setPalette(PAL0, jj1_font_pal.data, DMA);
+}
+
+static void hud_text(u8 row, u8 x, const char *t)
+{
+    while (*t && x < 40) {
+        hudMap[row * 40 + x] = TILE_ATTR_FULL(PAL0, 1, 0, 0, TILE_FONT_INDEX + (u8)(*t - 32));
+        t++; x++;
+    }
+}
+
+static void hud_number(u8 x, u8 digits, u16 value)
 {
     u8 i;
-    for (i = 0; i < 41; i++) {
-        if (hudShown[row][i] == line[i]) continue;
-        /* Content changed: rewrite this row once and remember it. */
-        for (i = 0; i < 41; i++) hudShown[row][i] = line[i];
-        VDP_drawTextBG(WINDOW, line, 0, row);
-        return;
+    for (i = digits; i > 0; i--) {
+        hudMap[x + i - 1] = HUD_ATTR(HUD_DIGIT0 + (value % 10));
+        value /= 10;
     }
 }
 
 static void draw_status_line(const JazzGame *g)
 {
-    char line[41];
-    char number[6];
-    u8 pos = 0;
+    u32 key = g->score * 31UL + g->lives + ((u32)g->stageGems << 8) +
+              ((u32)g->stageGemTotal << 16) + ((u32)g->health << 24) +
+              ((u32)g->player.shotType << 27) + (g->paused ? 0x40000000UL : 0) +
+              (g->transitionTimer ? 0x20000000UL : 0) + ((u32)jj1_controls << 20);
     u8 i;
-    const char *prefix = "LIVES ";
-    const char *gems = "  GEMS ";
-    const char *score = "  SCORE ";
+    if (key == hudKey) return;
+    hudKey = key;
 
-    while (*prefix) line[pos++] = *prefix++;
-    number_to_text(number, g->lives); for (i = 0; number[i]; i++) line[pos++] = number[i];
-    while (*gems) line[pos++] = *gems++;
-    number_to_text(number, g->stageGems); for (i = 0; number[i]; i++) line[pos++] = number[i];
-    line[pos++] = '/'; number_to_text(number, g->stageGemTotal); for (i = 0; number[i]; i++) line[pos++] = number[i];
-    while (*score) line[pos++] = *score++;
-    number_to_text(number, g->score); for (i = 0; number[i]; i++) line[pos++] = number[i];
-    hud_pad(line, pos);
-    hud_commit(0, line);
-
-    pos = 0;
-    if (g->paused) {
-        const char *text = "PAUSED  START RESUME  C SAVE";
-        while (*text) line[pos++] = *text++;
-    } else if (g->transitionTimer) {
-        const char *text = "              EXIT FOUND!";
-        while (*text) line[pos++] = *text++;
-    } else {
-        /* Keep text as ROM literals. A 68000 traps on the unaligned long
-           stores that recent GCC can otherwise use for a stack string. */
-        static const char *const healthText[6] = {
-            "HP:      ", "HP:*     ", "HP:**    ",
-            "HP:***   ", "HP:****  ", "HP:***** "
-        };
-        const char *text = healthText[(g->health < 6) ? g->health : 5];
+    for (i = 0; i < 80; i++) hudMap[i] = HUD_ATTR(HUD_PLATE);
+    /* score box: 8 digits, low five then high three */
+    hud_number(4, 5, (u16)(g->score % 100000UL));
+    hud_number(1, 3, (u16)((g->score / 100000UL) % 1000UL));
+    /* gems: icon, collected, total */
+    hudMap[10] = HUD_ATTR(HUD_PLANET);     hudMap[11] = HUD_ATTR(HUD_PLANET + 1);
+    hudMap[50] = HUD_ATTR(HUD_PLANET + 2); hudMap[51] = HUD_ATTR(HUD_PLANET + 3);
+    hud_number(12, 3, g->stageGems);
+    hud_number(16, 3, g->stageGemTotal);
+    /* lives */
+    hudMap[20] = HUD_ATTR(HUD_LIVES);      hudMap[21] = HUD_ATTR(HUD_LIVES + 1);
+    hudMap[60] = HUD_ATTR(HUD_LIVES + 2);  hudMap[61] = HUD_ATTR(HUD_LIVES + 3);
+    hud_number(22, 2, g->lives);
+    /* health hearts */
+    for (i = 0; i < 5; i++)
+        hudMap[40 + 1 + i] = HUD_ATTR((g->health > i) ? HUD_HEART_FULL : HUD_HEART_EMPTY);
+    /* weapon (row 0) */
+    {
         static const char *const weaponText[JAZZ_SHOT_TYPES] = {
-            "WPN:BLAST ", "WPN:TOAST ", "WPN:UP    ", "WPN:BOUNCE", "WPN:SPCL  "
+            "BLAST", "TOAST", "UP", "BOUNCE", "SPCL"
         };
-        const char *wpn = weaponText[(g->player.shotType < JAZZ_SHOT_TYPES) ?
-                                     g->player.shotType : 0];
-        static const char *const keysText[] = { "  A FIRE B JUMP C WPN", "  B FIRE A JUMP C WPN", "  C FIRE B JUMP A WPN" };
-        const char *keys = keysText[jj1_controls];
-        while (*text) line[pos++] = *text++;
-        while (*wpn) line[pos++] = *wpn++;
-        while (*keys) line[pos++] = *keys++;
+        hud_text(0, 24, "WPN:");
+        hud_text(0, 28, weaponText[(g->player.shotType < JAZZ_SHOT_TYPES) ? g->player.shotType : 0]);
     }
-    hud_pad(line, pos);
-    hud_commit(1, line);
+    /* message (row 1) */
+    if (g->paused)               hud_text(1, 24, "START  C SAVE");
+    else if (g->transitionTimer) hud_text(1, 24, "EXIT FOUND!");
+    else {
+        static const char *const keysText[3] = { "A FIRE B JUMP", "B FIRE A JUMP", "C FIRE B JUMP" };
+        hud_text(1, 24, keysText[jj1_controls % 3]);
+    }
+    VDP_setTileMapDataRect(WINDOW, hudMap, 0, 0, 40, 2, 40, DMA_QUEUE);
 }
 
-/* Force both rows to be re-sent after the window contents are destroyed
- * (title/end screens repaint the whole window plane). */
-static void hud_invalidate(void)
-{
-    hudShown[0][0] = 0;
-    hudShown[1][0] = 0;
-    hudShown[0][1] = 1; /* differs from any real padded line */
-    hudShown[1][1] = 1;
-}
 
 
 
@@ -189,6 +218,9 @@ static void render_level_map(void)
 }
 
 static u8 jj1BlockCache[JJ1_BLOCK_CACHE_BLOCKS];
+static u8 jj1BlockSlot[256];        /* reverse of jj1BlockCache: slot or 0xFF */
+static u8 jj1Visible[256];          /* == jj1VisStamp: in the 11x8 window */
+static u8 jj1VisStamp, jj1VisValid;
 static u8 jj1CacheReplace;
 static s16 jj1MapOriginX = -1;
 static s16 jj1MapOriginY = -1;
@@ -196,30 +228,49 @@ static const Jj1StageArt *stageArt;
 static const u32 *jj1ActiveBlockTiles;
 static const u8 *jj1ActiveBlocks;
 
+/* Block uploads during scrolling are queued for vblank so the 68000 is not
+ * stalled by a DMA running against the active display; the initial fill of a
+ * stage, which is far larger than one frame's queue, goes out immediately. */
+static TransferMethod blockTm = DMA;
+
 static void reset_jj1_cache(void)
 {
+    blockTm = DMA;
     u16 i;
     for (i = 0; i < JJ1_BLOCK_CACHE_BLOCKS; i++) jj1BlockCache[i] = 0xFF;
+    for (i = 0; i < 256; i++) jj1BlockSlot[i] = 0xFF;
+    jj1VisValid = 0;
     jj1CacheReplace = 0;
     jj1MapOriginX = -1;
     jj1MapOriginY = -1;
 }
 
-static u8 jj1_source_visible(u8 sourceBlock)
+/* Which source blocks the 11x8 window at the current origin shows, worked
+ * out once per window move instead of an 88-cell scan per cache candidate. */
+static void mark_visible_window(void)
 {
     u16 bx, by;
-    for (by = 0; by < 8; by++)
-        for (bx = 0; bx < 11; bx++)
-            if (jj1ActiveBlocks[((jj1MapOriginY + by) * 256) + jj1MapOriginX + bx] == sourceBlock)
-                return TRUE;
-    return FALSE;
+    if (++jj1VisStamp == 0) {
+        for (bx = 0; bx < 256; bx++) jj1Visible[bx] = 0;
+        jj1VisStamp = 1;
+    }
+    for (by = 0; by < 8; by++) {
+        const u8 *row = jj1ActiveBlocks + ((jj1MapOriginY + by) * 256) + jj1MapOriginX;
+        for (bx = 0; bx < 11; bx++) jj1Visible[row[bx]] = jj1VisStamp;
+    }
+    jj1VisValid = 1;
+}
+
+static u8 jj1_source_visible(u8 sourceBlock)
+{
+    if (!jj1VisValid) mark_visible_window();
+    return jj1Visible[sourceBlock] == jj1VisStamp;
 }
 
 static u16 cache_jj1_block(u8 sourceBlock)
 {
     u16 slot;
-    for (slot = 0; slot < JJ1_BLOCK_CACHE_BLOCKS; slot++)
-        if (jj1BlockCache[slot] == sourceBlock) return slot;
+    if (jj1BlockSlot[sourceBlock] != 0xFF) return jj1BlockSlot[sourceBlock];
 
     /* Replace only a block which left the 11x8 visible window. This avoids
        rewriting visible VRAM tiles while the plane scrolls. */
@@ -229,9 +280,11 @@ static u16 cache_jj1_block(u8 sourceBlock)
         slot = jj1CacheReplace++;
         if (jj1CacheReplace == JJ1_BLOCK_CACHE_BLOCKS) jj1CacheReplace = 0;
     }
+    if (jj1BlockCache[slot] != 0xFF) jj1BlockSlot[jj1BlockCache[slot]] = 0xFF;
     jj1BlockCache[slot] = sourceBlock;
+    jj1BlockSlot[sourceBlock] = (u8)slot;
     VDP_loadTileData(jj1ActiveBlockTiles + ((u32) sourceBlock * JJ1_BLOCK_TILE_COUNT * 8),
-        T_JJ1_BLOCK_CACHE + (slot * JJ1_BLOCK_TILE_COUNT), JJ1_BLOCK_TILE_COUNT, DMA);
+        T_JJ1_BLOCK_CACHE + (slot * JJ1_BLOCK_TILE_COUNT), JJ1_BLOCK_TILE_COUNT, blockTm);
     return slot;
 }
 
@@ -246,10 +299,24 @@ static void draw_jj1_block(s16 sourceX, s16 sourceY)
        matching the engine swapping the block out (setTile). */
     if (jazz_cell_destroyed(&game, (u8)sourceX, (u8)sourceY)) sourceBlock = 0;
     baseTile = T_JJ1_BLOCK_CACHE + (cache_jj1_block(sourceBlock) * JJ1_BLOCK_TILE_COUNT);
-    for (ty = 0; ty < 4; ty++)
-        for (tx = 0; tx < 4; tx++)
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL2, FALSE, FALSE, FALSE,
-                baseTile + (ty * 4) + tx), ((sourceX & 15) * 4) + tx, ((sourceY & 7) * 4) + ty);
+    {
+        /* One VRAM address per row of four map cells (auto-increment 2)
+           instead of a full VDP_setTileMapXY call per cell; the increment
+           must be set, since SGDK leaves whatever the last DMA used. */
+        vu32 *ctrl = (vu32 *)VDP_CTRL_PORT;
+        vu16 *data = (vu16 *)VDP_DATA_PORT;
+        u16 w = TILE_ATTR_FULL(PAL2, FALSE, FALSE, FALSE, baseTile);
+        u16 addr = VDP_getPlaneAddress(BG_A, (u16)((sourceX & 15) * 4), (u16)((sourceY & 7) * 4));
+        (void)tx;
+        /* queued DMAs (scroll tables, step 4/32) leave other increments set */
+        VDP_setAutoInc(2);
+        for (ty = 0; ty < 4; ty++) {
+            *ctrl = VDP_WRITE_VRAM_ADDR((u32)addr);
+            *data = w; *data = (u16)(w + 1); *data = (u16)(w + 2); *data = (u16)(w + 3);
+            w = (u16)(w + 4);
+            addr = (u16)(addr + 64 * 2);     /* next row of the 64-cell plane */
+        }
+    }
 }
 
 static void render_jj1_map(s16 originX, s16 originY)
@@ -266,6 +333,7 @@ static void render_jj1_map(s16 originX, s16 originY)
     oldY = jj1MapOriginY;
     jj1MapOriginX = originX;
     jj1MapOriginY = originY;
+    jj1VisValid = 0;            /* recomputed on the first cache miss */
 
     if ((oldX < 0) || ((originX - oldX > 1) || (oldX - originX > 1)) ||
         ((originY - oldY > 1) || (oldY - originY > 1))) {
@@ -320,6 +388,31 @@ static void play_music(const u8 *track)
     jj1_music_start(track);
 }
 
+/* Level palette animation: each reserved slot group turns through its ring of
+ * colours, in the direction and at the pace the original engine uses (see
+ * tools/jj1_cycle.py).  Phases restart with every stage. */
+static u8 cyclePhase[4], cycleTick[4];
+
+static void reset_palette_cycles(void)
+{
+    for (u8 i = 0; i < 4; i++) { cyclePhase[i] = 0; cycleTick[i] = 0; }
+}
+
+static void update_palette_cycles(void)
+{
+    for (u8 i = 0; i < stageArt->cycleCount; i++) {
+        const Jj1Cycle *c = &stageArt->cycles[i];
+        if (!(stageArt->cycleMask & c->bit)) continue;
+        if (++cycleTick[i] < c->stepFrames) continue;
+        cycleTick[i] = 0;
+        u8 k = c->count;
+        cyclePhase[i] = (c->dir > 0) ? (u8)((cyclePhase[i] + k - 1) % k)
+                                     : (u8)((cyclePhase[i] + 1) % k);
+        for (u8 s = 0; s < k; s++)
+            PAL_setColor((PAL2 * 16) + c->slot + s, c->colors[(s + cyclePhase[i]) % k]);
+    }
+}
+
 static void render_backdrop(u8 stage)
 {
     /* Everything that varies by stage comes from one table: the world's tile
@@ -330,6 +423,7 @@ static void render_backdrop(u8 stage)
     jj1ActiveBlocks = stageArt->blocks;
 
     PAL_setPalette(PAL2, stageArt->blockPalette, DMA);
+    reset_palette_cycles();
     PAL_setPalette(PAL1, stageArt->pal1, DMA);
     VDP_loadTileData(stageArt->springTiles, T_SPRING,
                      JJ1_SPRING_VARIANTS * JJ1_SPRING_TILES_PER_VARIANT, DMA);
@@ -337,6 +431,7 @@ static void render_backdrop(u8 stage)
     playerSlotFrame = 0xFFFF;
     boardSlotKey = 0xFFFF;
     bossGunArt = 0xFFFF;
+    itemSlotLoaded[0] = itemSlotLoaded[1] = 0xFFFF;
     for (u8 i = 0; i < JAZZ_MAX_ENEMIES; i++) enemySlotArt[i] = 0xFFFF;
 
     render_jj1_sky();
@@ -396,6 +491,17 @@ static void load_video_assets(void)
     XGM_setPCM(JJ1_SFX_ROCKET, jj1_rocket, sizeof(jj1_rocket));
     XGM_setPCM(JJ1_SFX_GODLIKE, jj1_godlike, sizeof(jj1_godlike));
     XGM_setPCM(JJ1_SFX_BLOCK3, jj1_block3, sizeof(jj1_block3));
+    XGM_setPCM(JJ1_SFX_EVT_MACHGUN, jj1_evt_machgun, sizeof(jj1_evt_machgun));
+    XGM_setPCM(JJ1_SFX_EVT_FIRE1, jj1_evt_fire1, sizeof(jj1_evt_fire1));
+    XGM_setPCM(JJ1_SFX_EVT_UPLOOP, jj1_evt_uploop, sizeof(jj1_evt_uploop));
+    XGM_setPCM(JJ1_SFX_EVT_PHOTON, jj1_evt_photon, sizeof(jj1_evt_photon));
+    XGM_setPCM(JJ1_SFX_EVT_WAIT, jj1_evt_wait, sizeof(jj1_evt_wait));
+    XGM_setPCM(JJ1_SFX_EVT_ORB, jj1_evt_orb, sizeof(jj1_evt_orb));
+    XGM_setPCM(JJ1_SFX_EVT_FLAMER, jj1_evt_flamer, sizeof(jj1_evt_flamer));
+    XGM_setPCM(JJ1_SFX_EVT_ELECTR, jj1_evt_electr, sizeof(jj1_evt_electr));
+    XGM_setPCM(JJ1_SFX_EVT_ROCKET2, jj1_evt_rocket2, sizeof(jj1_evt_rocket2));
+    XGM_setPCM(JJ1_SFX_EVT_STOP, jj1_evt_stop, sizeof(jj1_evt_stop));
+    XGM_setPCM(JJ1_SFX_EVT_BLOCK1, jj1_evt_block1, sizeof(jj1_evt_block1));
 }
 
 /* Follow the player with lag proportional to the distance, as the original
@@ -417,6 +523,53 @@ static s16 camera_follow(s16 camera, s16 wanted)
     return (s16)(camera + step);
 }
 
+#ifdef JAZZ_MAPCHECK
+/* Test builds: every visible 32 px cell of plane A must show the cached copy
+ * of the block the level puts there (shot-away blocks show block 0). */
+u16 mapCheckBad, mapCheckRuns, mapCheckBig, mapCheckBadSmall;
+static void map_check(void)
+{
+    static u8 seen[256];
+    u16 distinct = 0, before = mapCheckBad;
+    {
+        u16 i, x, y;
+        for (i = 0; i < 256; i++) seen[i] = 0;
+        for (y = 0; y < 8; y++) for (x = 0; x < 11; x++) {
+            s16 sx = jj1MapOriginX + x, sy = jj1MapOriginY + y;
+            u8 b = jj1ActiveBlocks[(sy * 256) + sx];
+            if (jazz_cell_destroyed(&game, (u8)sx, (u8)sy)) b = 0;
+            if (!seen[b]) { seen[b] = 1; distinct++; }
+        }
+    }
+    vu32 *ctrl = (vu32 *)VDP_CTRL_PORT;
+    vu16 *data = (vu16 *)VDP_DATA_PORT;
+    u16 bx, by, ty, tx;
+    mapCheckRuns++;
+    for (by = 0; by < 8; by++)
+        for (bx = 0; bx < 11; bx++) {
+            s16 sx = jj1MapOriginX + bx, sy = jj1MapOriginY + by;
+            u8 want = jj1ActiveBlocks[(sy * 256) + sx];
+            u16 slot;
+            if (jazz_cell_destroyed(&game, (u8)sx, (u8)sy)) want = 0;
+            slot = jj1BlockSlot[want];
+            if ((slot == 0xFF) || (jj1BlockCache[slot] != want)) { mapCheckBad++; continue; }
+            for (ty = 0; ty < 4; ty++) {
+                u16 addr = VDP_getPlaneAddress(BG_A, (u16)((sx & 15) * 4), (u16)((sy & 7) * 4 + ty));
+                SYS_disableInts();
+                *ctrl = VDP_READ_VRAM_ADDR((u32)addr);
+                for (tx = 0; tx < 4; tx++) {
+                    u16 w = *data;
+                    if ((w & 0x7FF) != T_JJ1_BLOCK_CACHE + slot * JJ1_BLOCK_TILE_COUNT + ty * 4 + tx)
+                        mapCheckBad++;
+                }
+                SYS_enableInts();
+            }
+        }
+    if (distinct > 64) mapCheckBig++;
+    else if (mapCheckBad != before) mapCheckBadSmall++;
+}
+#endif
+
 static void update_camera_and_map(void)
 {
     s16 wantedX = game.player.x - 150;
@@ -428,6 +581,15 @@ static void update_camera_and_map(void)
     cameraX = camera_follow(cameraX, wantedX);
     cameraY = camera_follow(cameraY, wantedY);
     render_jj1_map(cameraX >> 5, cameraY >> 5);
+#ifdef JAZZ_MAPCHECK
+    map_check();
+    {
+        char t[12];
+        intToStr(mapCheckBadSmall, t, 4); VDP_drawTextBG(WINDOW, t, 34, 1);
+        intToStr(mapCheckBig, t, 4); VDP_drawTextBG(WINDOW, t, 29, 1);
+        intToStr(mapCheckRuns, t, 5); VDP_drawTextBG(WINDOW, t, 23, 1);
+    }
+#endif
     VDP_setHorizontalScroll(BG_A, -cameraX);
     VDP_setVerticalScroll(BG_A, cameraY);
     VDP_setHorizontalScroll(BG_B, 0);
@@ -443,6 +605,16 @@ static void put_sprite(u16 *count, s16 x, s16 y, u8 size, u16 attr)
 
 /* Which event id each item VRAM slot currently holds; 0xFF = free. */
 static u8 itemSlotEvent[JJ1_ITEM_SLOTS];
+/* What each item slot's VRAM actually holds (event id and animation frame),
+ * kept across frames so a pickup that is still on screen is not re-uploaded
+ * sixty times a second; 0xFFFF = unknown. */
+
+static void upload_item_slot(u8 slot, u16 key, const u32 *src, u16 tiles)
+{
+    if (itemSlotLoaded[slot] == key) return;
+    VDP_loadTileData(src, T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES), tiles, DMA_QUEUE);
+    itemSlotLoaded[slot] = key;
+}
 
 /* Springs and uncollected items are drawn straight from the original event
  * grid within the visible 11x8 block window; the taken bitmap hides
@@ -477,10 +649,22 @@ static void render_jj1_events(u16 *count)
     s16 sx, sy;
     u8 i;
     for (i = 0; i < JJ1_ITEM_SLOTS; i++) itemSlotEvent[i] = 0xFF;
+    const u8 *grid = jj1_runtime_events(game.stage);
     for (sy = jj1MapOriginY; sy < jj1MapOriginY + 8; sy++) {
+        const u8 *row;
+        if ((sy < 0) || (sy >= 64)) continue;
+        row = grid + ((u16)sy << 8);
         for (sx = jj1MapOriginX; sx < jj1MapOriginX + 11; sx++) {
-            u8 id = jj1_runtime_event(game.stage, sx, sy);
-            const Jj1EventInfo *info = jj1_event_info(game.stage, id);
+            u8 id;
+            const Jj1EventInfo *info;
+            u8 klass;
+            if ((sx < 0) || (sx >= 256)) continue;
+            id = row[sx];
+            if (!id) continue;                 /* most cells hold nothing */
+            klass = jj1_runtime_klass(game.stage, id);
+            if ((klass != JJ1_CLASS_SPRING) && (klass != JJ1_CLASS_BRIDGE) &&
+                (klass != JJ1_CLASS_ITEM)) continue;
+            info = jj1_event_info(game.stage, id);
             if (info->klass == JJ1_CLASS_SPRING) {
                 /* param carries the launch magnitude; bucket it into the
                    three visual strengths. */
@@ -505,10 +689,9 @@ static void render_jj1_events(u16 *count)
                             if (itemSlotEvent[k] == 0xFF) {
                                 slot = k;
                                 itemSlotEvent[k] = id;
-                                VDP_loadTileData(stageArt->spriteTiles +
-                                    ((u32)art->tile * 8),
-                                    T_ITEM_BASE + (k * JJ1_ITEM_SLOT_TILES),
-                                    (u16)(art->tilesW * art->tilesH), DMA);
+                                upload_item_slot(k, (u16)(0x8000 | id),
+                                    stageArt->spriteTiles + ((u32)art->tile * 8),
+                                    (u16)(art->tilesW * art->tilesH));
                                 break;
                             }
                     if (slot != 0xFF) {
@@ -535,7 +718,7 @@ static void render_jj1_events(u16 *count)
                     u16 cellW = (u16)(art->tilesW << 3);
                     u16 cellH = (u16)(art->tilesH << 3);
                     u8 slot = 0xFF, s;
-                    u8 frame = (u8)((game.frame >> 3) % art->frames);
+                    u8 frame = anim_frame(art->frames);
                     for (s = 0; s < JJ1_ITEM_SLOTS; s++)
                         if (itemSlotEvent[s] == id) { slot = s; break; }
                     if (slot == 0xFF)
@@ -543,10 +726,10 @@ static void render_jj1_events(u16 *count)
                             if (itemSlotEvent[s] == 0xFF) {
                                 slot = s;
                                 itemSlotEvent[s] = id;
-                                VDP_loadTileData(stageArt->spriteTiles +
-                                    ((u32)(art->tile + (frame * art->tilesW * art->tilesH)) * 8),
-                                    T_ITEM_BASE + (s * JJ1_ITEM_SLOT_TILES),
-                                    (u16)(art->tilesW * art->tilesH), DMA);
+                                upload_item_slot(s, (u16)((id << 4) | (frame & 15)),
+                                    stageArt->spriteTiles +
+                                    ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                                    (u16)(art->tilesW * art->tilesH));
                                 break;
                             }
                     if (slot != 0xFF) {
@@ -576,6 +759,9 @@ static void render_sprites(void)
 {
     u16 count = 0;
     u8 i;
+#ifdef JAZZ_PROFILE
+    u32 pt0 = getSubTick();
+#endif
     VDP_resetSprites();
     {
         /* Jazz's animation state comes from the shared physics; each state is
@@ -584,15 +770,15 @@ static void render_sprites(void)
         u8 state = jazz_player_anim_state(&game, lastInput);
         const Jj1EventSprite *art = &stageArt->playerStates[state];
         u8 frames = art->frames ? art->frames : 1;
-        u8 frame = (u8)((game.frame >> 3) % frames);
+        u8 frame = anim_frame(frames);
         u16 wanted = (u16)((state << 3) | frame);
         u16 cellW = (u16)(art->tilesW << 3);
         u16 cellH = (u16)(art->tilesH << 3);
         u8 flip = !game.player.facing;
         if (playerSlotFrame != wanted) {
             VDP_loadTileData(stageArt->playerTiles +
-                             ((u32)(art->tile + (frame * art->tilesW * art->tilesH)) * 8),
-                             T_PLAYER, art->tilesW * art->tilesH, DMA);
+                             ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                             T_PLAYER, mul_u8(art->tilesW, art->tilesH), DMA_QUEUE);
             playerSlotFrame = wanted;
         }
         /* Airboard: the original draws the board sprite 10 px below the
@@ -602,11 +788,11 @@ static void render_sprites(void)
                 game.player.facing ? stageArt->board : stageArt->boardLeft;
             u16 need = (u16)(bd->tilesW * bd->tilesH);
             if (need <= JJ1_BOARD_SLOT_TILES) {
-                u8 frame = (u8)((game.frame >> 3) % bd->frames);
+                u8 frame = anim_frame(bd->frames);
                 u16 wanted = (u16)(0x200 | (game.player.facing << 4) | frame);
                 if (boardSlotKey != wanted) {
                     VDP_loadTileData(stageArt->spriteTiles +
-                        ((u32)(bd->tile + (frame * need)) * 8), T_BOARD, need, DMA);
+                        ((u32)(bd->tile + (u16)mul_u8(frame, (u8)need)) * 8), T_BOARD, need, DMA_QUEUE);
                     boardSlotKey = wanted;
                 }
                 put_sprite(&count,
@@ -624,13 +810,14 @@ static void render_sprites(void)
                 game.player.facing ? stageArt->bird : stageArt->birdLeft;
             u16 need = (u16)(b->tilesW * b->tilesH);
             if (need <= JJ1_ITEM_SLOT_TILES) {
-                u8 frame = (u8)((game.frame >> 3) % b->frames);
+                u8 frame = anim_frame(b->frames);
                 u16 key = (u16)(0xB0 | frame);
                 u16 slot = T_ITEM_BASE + ((JJ1_ITEM_SLOTS - 1) * JJ1_ITEM_SLOT_TILES);
                 if (itemSlotEvent[JJ1_ITEM_SLOTS - 1] != key) {
                     VDP_loadTileData(stageArt->spriteTiles +
-                        ((u32)(b->tile + (frame * need)) * 8), slot, need, DMA);
+                        ((u32)(b->tile + (u16)mul_u8(frame, (u8)need)) * 8), slot, need, DMA_QUEUE);
                     itemSlotEvent[JJ1_ITEM_SLOTS - 1] = (u8)key;
+                    itemSlotLoaded[JJ1_ITEM_SLOTS - 1] = 0xFFFF;
                 }
                 put_sprite(&count, game.player.birdX - cameraX,
                            game.player.birdY - cameraY,
@@ -655,8 +842,9 @@ static void render_sprites(void)
                 u8 k;
                 if (itemSlotEvent[0] != 0xFE) {
                     VDP_loadTileData(stageArt->spriteTiles + ((u32)sh->tile * 8),
-                                     slot, need, DMA);
+                                     slot, need, DMA_QUEUE);
                     itemSlotEvent[0] = 0xFE;
+                    itemSlotLoaded[0] = 0xFFFF;
                 }
                 for (k = 0; k < orbs; k++) {
                     const s8 *o = ring[(phase + (k << 1)) & 7];
@@ -703,15 +891,28 @@ static void render_sprites(void)
                                game.player.y - cameraY + PLAYER_H - (s16)cellH + (s16)(cy << 3),
                                SPRITE_SIZE(cw, ch),
                                TILE_ATTR_FULL(PAL1, TRUE, FALSE, flip, tile));
-                    tile = (u16)(tile + (cw * ch));
+                    tile = (u16)(tile + mul_u8(cw, ch));
                 }
             }
         }
     }
-    render_jj1_events(&count);
+#ifdef JAZZ_PROFILE
+    profT[7] += getSubTick() - pt0;
+#endif
+    PROF(5, render_jj1_events(&count));
+#ifdef JAZZ_PROFILE
+    pt0 = getSubTick();
+#endif
     for (i = 0; i < JAZZ_MAX_ENEMIES; i++)
         if (game.enemies[i].active) {
             const JazzEnemy *e = &game.enemies[i];
+            /* Off-screen enemies cost nothing: no event lookup, no VRAM
+               upload, no sprite entries.  (The guardian is large and carries
+               an energy bar, so it is always processed.) */
+            if (e->klass != JJ1_CLASS_BOSS) {
+                s16 ex = (s16)(e->x - cameraX), ey = (s16)(e->y - cameraY);
+                if ((ex < -80) || (ex > 400) || (ey < -80) || (ey > 300)) continue;
+            }
             /* The guardian's facing comes from its circuit state (1 and 2
                sweep left, 3 and 4 right); ordinary enemies use the sign. */
             u8 facingLeft = (e->klass == JJ1_CLASS_BOSS) ? e->bossFacing
@@ -740,7 +941,7 @@ static void render_sprites(void)
                    and never hardware-flip - that would double-mirror the many
                    enemies whose "right" art is itself drawn facing left. */
                 u16 slot = T_ENEMY_BASE + (i * JJ1_ENEMY_SLOT_TILES);
-                u8 frame = (u8)((game.frame >> 3) % art->frames);
+                u8 frame = anim_frame(art->frames);
                 u16 srcTile = (facingLeft ? art->tileLeft : art->tile);
                 u16 wanted = (u16)((srcTile << 3) | frame);
                 u16 cellW = (u16)(art->tilesW << 3);
@@ -748,9 +949,11 @@ static void render_sprites(void)
                 u16 tile = slot;
                 u8 cx, cy;
                 if (enemySlotArt[i] != wanted) {
+#ifndef NOENEMYDMA
                     VDP_loadTileData(stageArt->spriteTiles +
-                                     ((u32)(srcTile + (frame * art->tilesW * art->tilesH)) * 8),
-                                     slot, art->tilesW * art->tilesH, DMA);
+                                     ((u32)(srcTile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                                     slot, mul_u8(art->tilesW, art->tilesH), DMA_QUEUE);
+#endif
                     enemySlotArt[i] = wanted;
                 }
                 /* The cell is centred on the body and stands on its feet. */
@@ -764,7 +967,7 @@ static void render_sprites(void)
                                    e->y - cameraY + JAZZ_ENEMY_H - (s16)cellH + (s16)(cy << 3),
                                    SPRITE_SIZE(cw, ch),
                                    TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tile));
-                        tile = (u16)(tile + (cw * ch));
+                        tile = (u16)(tile + mul_u8(cw, ch));
                     }
                 }
                 /* The guardian carries an accessory - the cannon while it
@@ -785,14 +988,14 @@ static void render_sprites(void)
                     if (gun && gun->frames) {
                         u16 gunTiles = (u16)(gun->tilesW * gun->tilesH);
                         u16 gunSlot = (u16)(slot + (art->tilesW * art->tilesH));
-                        u8 gframe = (u8)((game.frame >> 3) % gun->frames);
+                        u8 gframe = anim_frame(gun->frames);
                         u16 gwant = (u16)(0x4000 | (gun->tile << 2) | gframe);
                         s16 cellX = e->x - cameraX + (JAZZ_ENEMY_W >> 1) - (s16)(cellW >> 1);
                         s16 cellY = e->y - cameraY + JAZZ_ENEMY_H - (s16)cellH;
                         if (bossGunArt != gwant) {
                             VDP_loadTileData(stageArt->spriteTiles +
-                                ((u32)(gun->tile + (gframe * gunTiles)) * 8),
-                                gunSlot, gunTiles, DMA);
+                                ((u32)(gun->tile + (u16)mul_u8(gframe, (u8)gunTiles)) * 8),
+                                gunSlot, gunTiles, DMA_QUEUE);
                             bossGunArt = gwant;
                         }
                         {
@@ -807,7 +1010,7 @@ static void render_sprites(void)
                                         cellY + gy + (s16)(ky << 3),
                                         SPRITE_SIZE(kw, kh),
                                         TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, gt));
-                                    gt = (u16)(gt + (kw * kh));
+                                    gt = (u16)(gt + mul_u8(kw, kh));
                                 }
                             }
                         }
@@ -832,9 +1035,12 @@ static void render_sprites(void)
     for (i = 0; i < JAZZ_MAX_BULLETS; i++)
         if (game.bullets[i].active)
             put_sprite(&count, game.bullets[i].x - cameraX, game.bullets[i].y - cameraY, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_BULLET));
+#ifdef JAZZ_PROFILE
+    profT[4] += getSubTick() - pt0;
+#endif
     if (count) {
         VDP_setSpriteLink(count - 1, 0);
-        VDP_updateSprites(count, DMA);
+        PROF(6, VDP_updateSprites(count, DMA_QUEUE));
     } else VDP_clearSprites();
 }
 
@@ -856,7 +1062,7 @@ static void update_sfx(void)
     if (game.events & JAZZ_EVENT_HURT)
         jj1_sfx_start(JJ1_SFX_OW, 2, SOUND_PCM_CH2);
     else if (game.events & JAZZ_EVENT_KILL)
-        jj1_sfx_start(JJ1_SFX_BOOM, 2, SOUND_PCM_CH2);
+        jj1_sfx_start(game.sfxEvent && jj1_event_sfx(game.sfxEvent) ? jj1_event_sfx(game.sfxEvent) : JJ1_SFX_BOOM, 2, SOUND_PCM_CH2);
     else if (game.events & JAZZ_EVENT_FIRE) {
         u8 id = jj1_shot_sfx(game.player.shotType);
         if (id) jj1_sfx_start(id, 1, SOUND_PCM_CH2);
@@ -869,6 +1075,10 @@ static void update_sfx(void)
         jj1_sfx_start(JJ1_SFX_JUMP, 1, SOUND_PCM_CH3);
     if (game.events & JAZZ_EVENT_LIFE)
         jj1_sfx_start(JJ1_SFX_ONEUP, 3, SOUND_PCM_CH4);
+    else if (game.sfxEvent && jj1_event_sfx(game.sfxEvent) && !(game.events & (JAZZ_EVENT_HURT | JAZZ_EVENT_KILL)))
+        /* the sound the level data gives this event (an item's own pickup
+           noise, a breaking block); kills keep the explosion above */
+        jj1_sfx_start(jj1_event_sfx(game.sfxEvent), 1, SOUND_PCM_CH4);
     else if (game.events & (JAZZ_EVENT_GEM | JAZZ_EVENT_HEALTH))
         jj1_sfx_start(JJ1_SFX_PICKUP, 1, SOUND_PCM_CH4);
 }
@@ -898,7 +1108,7 @@ static int run_bonus(u8 index)
     load_video_assets();
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
-    hud_invalidate();
+    hud_enter();
     reset_sprite_slots();
     return r;
 }
@@ -928,7 +1138,7 @@ static void begin_play(u8 loaded)
     game.previousInput = input_from_pad(playPreviousPad);
     VDP_setWindowOnTop(2);
     VDP_clearPlane(WINDOW, TRUE);
-    hud_invalidate();
+    hud_enter();
     render_backdrop(game.stage);
     render_level_map();
     renderedStage = game.stage;
@@ -982,6 +1192,7 @@ static void cheat_feed(u16 pressed)
 
 static void show_title(void)
 {
+    hud_leave();
     jj1_show_original_title();
     VDP_setTextPlane(WINDOW);
     draw_level_select();
@@ -1101,7 +1312,7 @@ static void setup_menu(void)
 static void restore_paused_game(void)
 {
     load_video_assets(); VDP_clearPlane(WINDOW,TRUE); VDP_setWindowOnTop(2);
-    hud_invalidate(); render_backdrop(game.stage); render_level_map();
+    hud_enter(); render_backdrop(game.stage); render_level_map();
     cameraX = game.player.x > 150 ? game.player.x - 150 : 0;
     cameraY = game.player.y > 96 ? game.player.y - 96 : 0;
     update_camera_and_map(); renderedStage=game.stage; renderedDestroyCount=game.destroyCount;
@@ -1127,6 +1338,7 @@ static void select_main_menu(void)
 
 static void show_end(const char *title, const char *message)
 {
+    hud_leave();
     VDP_setWindowFullScreen();
     VDP_clearPlane(WINDOW, TRUE);
     VDP_setTextPlane(WINDOW);
@@ -1139,14 +1351,14 @@ static void run_play_frame(u16 input)
 {
     u8 completingLevel = (game.transitionTimer == 1 && !game.paused);
     lastInput = input;
-    jazz_step(&game, input);
+    PROF(0, jazz_step(&game, input));
     if (completingLevel && !game.transitionTimer && !game.paused) {
         if (renderedStage < JAZZ_STAGE_COUNT && stage_has_clear_scene[renderedStage]) {
             jj1_play_level_clear(jj1_music_endlevel);
             playingMusic = 0;
             load_video_assets();
             VDP_setWindowOnTop(2);
-            hud_invalidate();
+            hud_enter();
             reset_sprite_slots();
         }
     }
@@ -1163,7 +1375,7 @@ static void run_play_frame(u16 input)
             playingMusic = 0;
             load_video_assets();
             VDP_setWindowOnTop(2);
-            hud_invalidate();
+            hud_enter();
             reset_sprite_slots();
             /* Consume START/B used to skip the approach, rather than pausing. */
             game.previousInput = input_from_pad(JOY_readJoypad(JOY_1));
@@ -1172,14 +1384,16 @@ static void run_play_frame(u16 input)
         render_level_map();
         renderedStage = game.stage;
     }
-    update_camera_and_map();
+    update_palette_cycles();
+    PROF(1, update_camera_and_map());
+    blockTm = DMA_QUEUE;   /* the first call filled the screen; scrolling is queued */
     if (game.destroyCount != renderedDestroyCount) {
         draw_jj1_block(game.destroyedX, game.destroyedY);
         renderedDestroyCount = game.destroyCount;
     }
-    draw_status_line(&game);
-    render_sprites();
-    update_sfx();
+    PROF(2, draw_status_line(&game));
+    PROF(3, render_sprites());
+    PROF(4, update_sfx());
     if (game.finished) {
         if (game.lives) {
             jj1_play_episode_ending(jj1_music_bonus);
@@ -1212,6 +1426,23 @@ static u8 run_target_point_to_point_tests(void)
     { u8 i; for (i = 0; i < 4; i++) jazz_step(probe, JAZZ_INPUT_RIGHT); }
     if (probe->player.x <= startX) return 0;
 
+    /* Palette cycling: after a second of frames every active range must have
+       advanced, and CRAM must hold the colour its phase calls for. */
+    stageArt = &jazz_stage_art[2];
+    reset_palette_cycles();
+    { u8 i; for (i = 0; i < 70; i++) update_palette_cycles(); }
+    { u8 i, moved = 0;
+      for (i = 0; i < stageArt->cycleCount; i++) {
+          const Jj1Cycle *c = &stageArt->cycles[i];
+          if (!(stageArt->cycleMask & c->bit)) continue;
+          moved++;
+          { u8 steps = 70 / c->stepFrames, k = c->count;
+            u8 want = (c->dir > 0) ? (u8)((k - (steps % k)) % k) : (u8)(steps % k);
+            if (cyclePhase[i] != want) return 2; }
+          if (PAL_getColor((PAL2 * 16) + c->slot) != c->colors[cyclePhase[i] % c->count]) return 3;
+      }
+      if (!moved) return 4; }
+
     /* Guardian activation is covered by the host tests, which can afford to
        search the level data for the arena.  Doing that scan here costs tens of
        thousands of event lookups on the 68000 at boot, which stalls the probe
@@ -1243,7 +1474,9 @@ int main(bool hardReset)
     while (TRUE) SYS_doVBlankProcess();
 #endif
 #ifdef JAZZ_AUTOTEST
-    if (run_target_point_to_point_tests()) {
+    u8 probeResult;
+    probeResult = run_target_point_to_point_tests();
+    if (probeResult == 1) {
         /* A deterministic SRAM marker lets the external emulator runner
          * assert the result without scraping a window or debugger console. */
         SRAM_enable();
@@ -1255,7 +1488,7 @@ int main(bool hardReset)
         SRAM_enable();
         SRAM_writeByte(0, 'J'); SRAM_writeByte(1, 'A');
         SRAM_writeByte(2, 'Z'); SRAM_writeByte(3, 'P');
-        SRAM_writeByte(4, 0); SRAM_disable();
+        SRAM_writeByte(4, probeResult); SRAM_disable();
         KLog("JAZZ_P2P_FAIL");
     }
     while (TRUE) SYS_doVBlankProcess();
@@ -1345,11 +1578,71 @@ int main(bool hardReset)
         } else if (mode == MODE_PLAY) {
             if (game.paused && (pad & BUTTON_C) && !(playPreviousPad & BUTTON_C)) {
                 slot_menu(1); restore_paused_game();
-            } else { playPreviousPad=pad; run_play_frame(input_from_pad(pad)); }
+            } else {
+                playPreviousPad=pad;
+#ifdef JAZZ_AUTOPILOT
+                {   /* test builds: input from the play iteration, not the pad */
+                    static u16 it;
+                    u16 in = (it % 1200 < 800) ? JAZZ_INPUT_RIGHT : JAZZ_INPUT_LEFT;
+                    if ((it % 70) < 18) in |= JAZZ_INPUT_JUMP;
+                    if ((it % 400) > 380) in |= JAZZ_INPUT_DOWN;
+                    it++;
+                    run_play_frame(in);
+#ifdef JAZZ_MAPCHECK
+                    if (it == 800) {
+                        /* result for the test script: M,A,P,C then 1 = no mismatch (windows needing more than 64 distinct blocks cannot all be cached and are not counted) */
+                        SRAM_enable();
+                        SRAM_writeByte(0, 'M'); SRAM_writeByte(1, 'A');
+                        SRAM_writeByte(2, 'P'); SRAM_writeByte(3, 'C');
+                        SRAM_writeByte(4, mapCheckBadSmall ? 2 : 1);
+                        SRAM_disable();
+                    }
+#endif
+                    {
+                        char t[8];
+                        intToStr(it, t, 5); VDP_drawTextBG(WINDOW, t, 17, 1);
+                    }
+                }
+#else
+                run_play_frame(input_from_pad(pad));
+#endif
+            }
+#ifdef JAZZ_PROFILE
+            { static u8 t; static u16 lastV, missed, worst, total;
+              u16 dv = (u16)(vtimer - lastV); lastV = vtimer;
+              if (dv > 1 && dv < 60) { missed += dv - 1; total += dv - 1; if (dv > worst) worst = dv; }
+              if (!(++t & 31)) {
+                char b[40]; u8 i, n = 0;
+                /* average microseconds per frame of each stage: step, camera,
+                   status, sprites, sfx */
+                for (i = 0; i < 8; i++) {
+                    u16 us = (u16)((profT[i] / 32) * 13 / 1000 * 1000 / 1000);
+                    /* subtick = 13.02 us; show tenths of a millisecond */
+                    us = (u16)((profT[i] / 32) * 13 / 100);
+                    b[n++] = (char)('0' + us / 10 % 10);
+                    b[n++] = (char)('0' + us % 10); b[n++] = ' ';
+                    profT[i] = 0;
+                }
+                b[n++] = (char)('0' + (missed > 9 ? 9 : missed));
+                b[n++] = (char)('0' + (worst > 9 ? 9 : worst));
+                missed = 0; worst = 0;
+                VDP_drawTextBG(WINDOW, "    ", 36, 0);
+                { char tt[6]; intToStr(total, tt, 4); VDP_drawTextBG(WINDOW, tt, 36, 0); }
+                b[n] = 0;
+                VDP_drawTextBG(WINDOW, b, 12, 1); } }
+#endif
         } else if (pad & BUTTON_START) {
             show_title();
         }
+#ifdef JAZZ_FIXED_PACE
+        /* test builds: every loop iteration takes exactly two frames, so two
+           builds of different speed can be compared screenshot for screenshot */
+        { static u16 paceStart; SYS_doVBlankProcess();
+          while ((u16)(vtimer - paceStart) < JAZZ_FIXED_PACE) SYS_doVBlankProcess();
+          paceStart = vtimer; }
+#else
         SYS_doVBlankProcess();
+#endif
     }
 #endif
     return 0;

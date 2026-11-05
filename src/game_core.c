@@ -62,24 +62,68 @@ u8 jazz_cell_destroyed(const JazzGame *g, u8 gridX, u8 gridY)
     return (u8)((g->destroyed[bit >> 3] >> (bit & 7)) & 1);
 }
 
-static u8 point_destroyed(const JazzGame *g, s16 x, s16 y)
+
+#ifdef JAZZ_JJ1_RUNTIME
+/* jj1_runtime_mask_cell inlined over the runtime's cached tables: the core
+ * probes several points per pixel moved, and two cross-file calls each were
+ * a large share of the frame on the 68000.  Same rules, same answers. */
+static const Jj1Fast *fast_tables(u8 stage)
 {
-    s16 gx = x >> 5, gy = y >> 5;
-    if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return 0;
-    return jazz_cell_destroyed(g, (u8)gx, (u8)gy);
+    static const Jj1Fast *f;
+    if (!f || (f->stage != stage)) f = jj1_runtime_fast(stage);
+    return f;
+}
+
+static u8 fast_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
+{
+    const Jj1Fast *f;
+    u16 at;
+    u8 event, klass, block;
+    if ((cellX < 0) || (cellX >= (256 * 8)) || (cellY < 0) || (cellY >= (64 * 8))) return 1;
+    f = fast_tables(stage);
+    at = (u16)((((u16)cellY >> 3) << 8) + ((u16)cellX >> 3));
+    event = f->events[at];
+    klass = (event < 128) ? f->klass[event] : 0;
+    if (!allowOneWay && (klass == JJ1_CLASS_ONEWAY)) return 0;
+    if (klass == JJ1_CLASS_BRIDGE)
+        return allowOneWay ? jj1_runtime_bridge_deck(stage, cellX, cellY) : 0;
+    if (allowOneWay && f->hasBridge &&
+        (f->bridgeRows[(u16)cellY >> 6] & (1 << (((u16)cellY >> 3) & 7))) &&
+        jj1_runtime_bridge_deck(stage, cellX, cellY)) return 1;
+    block = f->blocks[at];
+    if (block >= 240) return 0;
+    return (f->masks[((u16)block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? 1 : 0;
+}
+
+static u8 fast_point_solid(const JazzGame *g, s16 x, s16 y, u8 allowOneWay)
+{
+    s16 gx, gy;
+    if (!fast_mask_cell(g->stage, x >> 2, y >> 2, allowOneWay)) return 0;
+    gx = x >> 5; gy = y >> 5;
+    if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return 1;
+    return !jazz_cell_destroyed(g, (u8)gx, (u8)gy);
 }
 
 static u8 pt_solid(const JazzGame *g, s16 x, s16 y)
 {
-    if (!jj1_runtime_point_solid(g->stage, x, y)) return 0;
-    return !point_destroyed(g, x, y);
+    return fast_point_solid(g, x, y, 0);
 }
 
 static u8 down_pt_solid(const JazzGame *g, s16 x, s16 y)
 {
-    if (!jj1_runtime_down_point_solid(g->stage, x, y)) return 0;
-    return !point_destroyed(g, x, y);
+    return fast_point_solid(g, x, y, 1);
 }
+#else
+static u8 pt_solid(const JazzGame *g, s16 x, s16 y)
+{
+    return jj1_runtime_point_solid_d(g->stage, x, y, 0, g->destroyed);
+}
+
+static u8 down_pt_solid(const JazzGame *g, s16 x, s16 y)
+{
+    return jj1_runtime_point_solid_d(g->stage, x, y, 1, g->destroyed);
+}
+#endif
 #endif
 
 u8 jazz_is_solid(const JazzGame *g, s16 tx, s16 ty)
@@ -98,17 +142,9 @@ static u8 rect_hits_solid(const JazzGame *g, s16 x, s16 y, s16 w, s16 h)
     if ((x < 0) || (y < 0) || ((x + w - 1) >= WORLD_W) || ((y + h - 1) >= WORLD_H)) return 1;
 #ifdef JAZZ_JJ1_RUNTIME
     {
-        /* Sample the 4px mask grid so a block that has been shot away does not
-           keep blocking, which jj1_runtime_rect_solid alone cannot know. */
-        s16 px, py;
-        for (py = y; py < y + h; py += 4)
-            for (px = x; px < x + w; px += 4)
-                if (pt_solid(g, px, py)) return 1;
-        for (py = y; py < y + h; py += 4)
-            if (pt_solid(g, (s16)(x + w - 1), py)) return 1;
-        for (px = x; px < x + w; px += 4)
-            if (pt_solid(g, px, (s16)(y + h - 1))) return 1;
-        return pt_solid(g, (s16)(x + w - 1), (s16)(y + h - 1));
+        /* Every 4 px mask cell under the rectangle, minus blocks that have
+           been shot away (jj1_runtime_rect_solid alone cannot know those). */
+        return jj1_runtime_rect_solid_d(g->stage, x, y, w, h, g->destroyed);
     }
 #else
     s16 tx0, tx1, ty0, ty1, tx, ty;
@@ -134,6 +170,12 @@ u8 jazz_event_taken(const JazzGame *g, u8 gridX, u8 gridY)
     return (g->taken[bit >> 3] >> (bit & 7)) & 1;
 }
 
+/* Class of the event in a grid cell, from the runtime's cached tables (the
+ * same answer as jj1_event_info(stage, jj1_runtime_event(...))->klass for
+ * an in-range cell, without two cross-file calls per cell). */
+#define GRID_KLASS(grid, klass, gx, gy) \
+    ((u8)(((grid)[((u16)(gy) << 8) + (gx)] < 128) ? (klass)[(grid)[((u16)(gy) << 8) + (gx)]] : JJ1_CLASS_NONE))
+
 static void mark_event_taken(JazzGame *g, u8 gridX, u8 gridY)
 {
     u16 bit = ((u16)gridY << 8) + gridX;
@@ -144,11 +186,12 @@ static void count_stage_items(JazzGame *g)
 {
     u16 gx;
     u8 gy;
+    const u8 *grid = jj1_runtime_events(g->stage);
+    const u8 *klass = jj1_runtime_klass_table(g->stage);
     g->stageGemTotal = 0;
     for (gy = 0; gy < 64; gy++)
         for (gx = 0; gx < 256; gx++)
-            if (jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy))->klass
-                == JJ1_CLASS_ITEM) g->stageGemTotal++;
+            if (GRID_KLASS(grid, klass, gx, gy) == JJ1_CLASS_ITEM) g->stageGemTotal++;
 }
 
 #else /* !JAZZ_JJ1_RUNTIME */
@@ -242,10 +285,11 @@ static void build_stage(JazzGame *g, u8 stage)
     g->bossPresent = 0;
     {
         s16 bx, by;
+        const u8 *grid = jj1_runtime_events(stage);
+        const u8 *klass = jj1_runtime_klass_table(stage);
         for (by = 0; by < 64 && !g->bossPresent; by++)
             for (bx = 0; bx < 256; bx++)
-                if (jj1_event_info(stage, jj1_runtime_event(stage, bx, by))->klass
-                    == JJ1_CLASS_BOSS) {
+                if (GRID_KLASS(grid, klass, bx, by) == JJ1_CLASS_BOSS) {
                     g->bossGridX = (u8)bx;
                     g->bossGridY = (u8)by;
                     g->bossPresent = 1;
@@ -500,6 +544,7 @@ static void kill_enemy(JazzGame *g, JazzEnemy *e)
     g->score += 100;
     g->events |= JAZZ_EVENT_KILL;
 #ifdef JAZZ_JJ1_RUNTIME
+    g->sfxEvent = jj1_event_info(g->stage, jj1_runtime_event(g->stage, e->gridX, e->gridY))->sound;
     mark_event_taken(g, e->gridX, e->gridY);
     /* Defeating the guardian (modifier 8) ends the level, the same way the
        exit sign does. */
@@ -513,6 +558,7 @@ static void kill_enemy(JazzGame *g, JazzEnemy *e)
 #ifdef JAZZ_JJ1_RUNTIME
 static void destroy_cell(JazzGame *g, u8 gridX, u8 gridY)
 {
+    g->sfxEvent = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gridX, gridY))->sound;
     u16 bit = ((u16)gridY << 8) + gridX;
     g->destroyed[bit >> 3] |= (u8)(1 << (bit & 7));
     /* Tell the renderer which block to repaint as empty. */
@@ -829,14 +875,22 @@ static void scan_grid_enemies(JazzGame *g)
     /* round-robin: one activation column per frame */
     gx = gx0 + (s16)(g->enemyScanColumn % (u16)(gx1 - gx0 + 1));
     g->enemyScanColumn++;
+    {
+        const u8 *grid = jj1_runtime_events(g->stage);
+        const u8 *klass = jj1_runtime_klass_table(g->stage);
     for (gy = gy0; gy <= gy1; gy++) {
-        const Jj1EventInfo *info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
+        const u8 k = GRID_KLASS(grid, klass, gx, gy);
+        const Jj1EventInfo *info;
+        if ((k != JJ1_CLASS_ENEMY_WALK) && (k != JJ1_CLASS_ENEMY_FLY) &&
+            (k != JJ1_CLASS_BOSS) && (k != JJ1_CLASS_HAZARD)) continue;
+        info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
         if (((info->klass == JJ1_CLASS_ENEMY_WALK) ||
              (info->klass == JJ1_CLASS_ENEMY_FLY) ||
              (info->klass == JJ1_CLASS_BOSS) ||
              (info->klass == JJ1_CLASS_HAZARD)) &&
             !jazz_event_taken(g, (u8)gx, (u8)gy))
             spawn_grid_enemy(g, (u8)gx, (u8)gy, info->klass, info->strength);
+    }
     }
 
     /* The guardian wakes from anywhere within two screens of its arena, and
@@ -873,6 +927,7 @@ static void grant_item(JazzGame *g, const Jj1EventInfo *info, u8 gridX, u8 gridY
     g->stageGems++;
     g->score += (u16)info->points * 25;
     g->events |= JAZZ_EVENT_GEM;
+    g->sfxEvent = info->sound;
     switch (kind) {
     case JJ1_ITEM_DIAMOND:
         g->bonusGem = 1;
@@ -939,7 +994,10 @@ static void collect_grid_items(JazzGame *g)
     for (gy = gy0; gy <= gy1; gy++) {
         for (gx = gx0; gx <= gx1; gx++) {
             const Jj1EventInfo *info;
+            u8 k;
             if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) continue;
+            k = GRID_KLASS(jj1_runtime_events(g->stage), jj1_runtime_klass_table(g->stage), gx, gy);
+            if ((k != JJ1_CLASS_UNBOARD) && (k != JJ1_CLASS_ITEM)) continue;
             info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
             if (info->klass == JJ1_CLASS_UNBOARD) {
                 /* Modifier 38: "Airboard, etc. off".  The zone persists and
@@ -1343,6 +1401,7 @@ void jazz_step(JazzGame *g, u16 input)
     u16 pressed = input & ~g->previousInput;
     s8 dx, dy;
     g->events = JAZZ_EVENT_NONE;
+    g->sfxEvent = 0;
     g->bonusPending = 0;
     g->frame++;
 

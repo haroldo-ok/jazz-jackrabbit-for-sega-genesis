@@ -2,7 +2,7 @@
 // The menu theme plus this episode's world tracks.
 XGM jj1_music_menu     "music/menu.vgm"
 XGM jj1_music_bonus    "music/bonus.vgm"
+XGM jj1_music_endlevel "music/endlevel.vgm"
 XGM jj1_music_world0  "music/diamondus.vgm"
 XGM jj1_music_world1  "music/tubelectric.vgm"
 XGM jj1_music_world2  "music/medivo.vgm"
-XGM jj1_music_endlevel "music/endlevel.vgm"

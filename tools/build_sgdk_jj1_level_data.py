@@ -269,23 +269,24 @@ def eventset_include(name: str, eventset: bytes, anims: bytes) -> str:
     # JJ1Level::load fills eventSet[i] from buffer[i * ELENGTH] and then looks
     # events up as eventSet[grid.event]: record i IS event i.  The old code
     # emitted record i as event i+1, which shifted every property by one slot.
-    entries: dict[int, tuple[int, int, int, int]] = {}
+    entries: dict[int, tuple[int, int, int, int, int]] = {}
     for i in range(1, 127):
         record = eventset[i * 32:(i + 1) * 32]
         anim_id = record[6] or record[5]
         has_anim = bool(anim_id) and anim_id < 128 and anims[(anim_id << 6) + 6] > 0
-        entries[i] = classify_event(record, has_anim)
+        sound = record[21] if 0 < record[21] <= 22 else 0   # global SOUNDS.000 index
+        entries[i] = classify_event(record, has_anim) + (sound,)
 
     # The engine hard-codes two event ids at tile level rather than in the
     # records (JJ1Level::checkMaskUp / checkSpikes), so their records are blank
     # and they must be filled in here.
-    entries[122] = (CLASS_ONEWAY, 0, 0, 0)
-    entries[126] = (CLASS_HAZARD, 0, 0, 0)
+    entries[122] = (CLASS_ONEWAY, 0, 0, 0, 0)
+    entries[126] = (CLASS_HAZARD, 0, 0, 0, 0)
 
     for i in sorted(entries):
-        klass, param, points, strength = entries[i]
+        klass, param, points, strength, sound = entries[i]
         if klass or param or points or strength:
-            lines.append(f"    [{i}] = {{ {klass}, {param}, {points}, {strength} }},")
+            lines.append(f"    [{i}] = {{ {klass}, {param}, {points}, {strength}, {sound} }},")
     lines.append("};")
     return "\n".join(lines)
 

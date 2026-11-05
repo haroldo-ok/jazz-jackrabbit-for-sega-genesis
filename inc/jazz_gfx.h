@@ -109,6 +109,17 @@ typedef struct {
                    /* JJ1 has separate art per direction, picked not flipped */
 } Jj1EventSprite;
 
+/* One rotating palette range (see tools/jj1_cycle.py): `count` consecutive
+ * slots of the terrain line, starting at `slot`, take their colours from the
+ * ring `colors` shifted by the current phase every `stepFrames` frames.  `bit`
+ * is tested against the level's mask, since which ranges turn depends on the
+ * level's background type. */
+typedef struct {
+    u8 slot, count, bit, stepFrames;
+    s8 dir;
+    u16 colors[4];
+} Jj1Cycle;
+
 /* Everything that changes between stages.  The shareware ships eight levels
  * across three worlds: the block tile bank and its palette belong to the
  * world, while the map, sprite palette, Jazz frames, springs and event sprites
@@ -116,6 +127,9 @@ typedef struct {
 typedef struct {
     const u32 *blockTiles;      /* shared by every level in the world */
     const u16 *blockPalette;
+    const Jj1Cycle *cycles;     /* the world's rotating palette ranges */
+    u8 cycleCount;
+    u8 cycleMask;               /* which of them this level turns */
     const u8  *blocks;
     const u16 *pal1;            /* sprite palette */
     const u32 *playerTiles;

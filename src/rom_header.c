@@ -16,7 +16,7 @@ const ROMHeader rom_header = {
     0x000,
     "JD              ",
     0x00000000,
-    0x0039FFFF, /* 0x3a0000-byte padded shareware ROM */
+    0x003FFFFF, /* up to 4 MB: the ROM is padded to a 128 KB multiple below that */
     0xE0FF0000,
     0xE0FFFFFF,
     "RA",

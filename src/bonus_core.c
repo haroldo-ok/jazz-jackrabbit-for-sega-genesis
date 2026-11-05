@@ -51,13 +51,24 @@ void bonus_init(BonusGame *b, u8 level, const u8 *floorTiles, const u8 *masks,
     b->direction = FQ;
     b->running = 0; b->crashed = 0; b->jumping = 0;
     b->gems = 0; b->removedCount = 0; b->sound = 0; b->gotTime = 0;
+    for (i = 0; i < 32; i++) b->removedRows[i] = 0;
 }
 
 static int is_removed(const BonusGame *b, u16 cell)
 {
-    u8 i;
+    u8 i, row = (u8)(cell >> 8);
+    /* most rows never had anything taken: skip the list scan */
+    if (!(b->removedRows[row >> 3] & (1 << (row & 7)))) return 0;
     for (i = 0; i < b->removedCount; i++) if (b->removed[i] == cell) return 1;
     return 0;
+}
+
+static void remove_cell(BonusGame *b, u16 cell)
+{
+    if (b->removedCount < BONUS_MAX_REMOVED) {
+        b->removed[b->removedCount++] = cell;
+        b->removedRows[(cell >> 8) >> 3] |= (u8)(1 << ((cell >> 8) & 7));
+    }
 }
 
 u8 bonus_event(const BonusGame *b, int tx, int ty)
@@ -166,13 +177,11 @@ int bonus_step(BonusGame *b, u8 input)
             switch (b->evType[ev & 15]) {
             case 1:   /* extra time */
                 add_time(b, 60); b->gotTime = 1;
-                if (b->removedCount < BONUS_MAX_REMOVED)
-                    b->removed[b->removedCount++] = (u16)((ty << 8) | tx);
+                remove_cell(b, (u16)((ty << 8) | tx));
                 break;
             case 2:   /* gem */
                 b->gems++;
-                if (b->removedCount < BONUS_MAX_REMOVED)
-                    b->removed[b->removedCount++] = (u16)((ty << 8) | tx);
+                remove_cell(b, (u16)((ty << 8) | tx));
                 if (b->gems >= b->items) return BONUS_WON;
                 break;
             case 7:   /* exit */

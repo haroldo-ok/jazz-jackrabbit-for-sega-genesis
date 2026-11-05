@@ -44,6 +44,7 @@ typedef struct {
     /* collected events */
     u16 removed[BONUS_MAX_REMOVED];
     u8 removedCount;
+    u8 removedRows[32];     /* bit per map row that has a removed cell */
     /* sound request for the last step: event sound id (SE index) or 0 */
     u8 sound;
     u8 gotTime;
