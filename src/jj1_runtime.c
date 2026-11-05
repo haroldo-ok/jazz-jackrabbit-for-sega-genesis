@@ -34,12 +34,74 @@ static Jj1LevelData jj1_level_data(u8 stage)
     return d;
 }
 
+/* The queries below run dozens of times per frame (every collision probe and
+ * every cell of the visible event window), so the per-stage data is resolved
+ * once and kept: the pointer table, a flat class byte per event id, and
+ * whether the level has any bridge at all (most do not, and finding out costs
+ * a nine-cell scan per probe). */
+static struct {
+    u8 stage;
+    Jj1LevelData d;
+    u8 klass[128];
+    u8 hasBridge;
+    u8 bridgeRows[8];       /* bit per grid row that holds a bridge event */
+} L = { .stage = 0xFF };
+
+static Jj1Fast F = { 0, 0, 0, 0, 0, 0xFF, 0 };
+
+static const Jj1LevelData *lvl(u8 stage)
+{
+    if (L.stage != stage) {
+        u16 i;
+        L.d = jj1_level_data(stage);
+        for (i = 0; i < 128; i++) L.klass[i] = jj1_event_info(stage, (u8)i)->klass;
+        L.hasBridge = 0;
+        for (i = 0; i < 8; i++) L.bridgeRows[i] = 0;
+        for (i = 0; i < (u16)(256 * 64); i++) {
+            u8 e = L.d.events[i];
+            if ((e < 128) && (L.klass[e] == JJ1_CLASS_BRIDGE)) {
+                L.hasBridge = 1;
+                L.bridgeRows[i >> 11] |= (u8)(1 << ((i >> 8) & 7));
+            }
+        }
+        L.stage = stage;
+        F.stage = 0xFF;
+    }
+    return &L.d;
+}
+
+const u8 *jj1_runtime_events(u8 stage)
+{
+    return lvl(stage)->events;
+}
+
+const Jj1Fast *jj1_runtime_fast(u8 stage)
+{
+    const Jj1LevelData *d = lvl(stage);
+    if (F.stage != stage) {
+        F.events = d->events; F.blocks = d->blocks; F.masks = d->masks;
+        F.klass = L.klass; F.bridgeRows = L.bridgeRows;
+        F.hasBridge = L.hasBridge; F.stage = stage;
+    }
+    return &F;
+}
+
+const u8 *jj1_runtime_klass_table(u8 stage)
+{
+    (void)lvl(stage);
+    return L.klass;
+}
+
+u8 jj1_runtime_klass(u8 stage, u8 id)
+{
+    (void)lvl(stage);
+    return (id < 128) ? L.klass[id] : 0;
+}
+
 u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY)
 {
-    Jj1LevelData d;
     if ((blockX < 0) || (blockX >= 256) || (blockY < 0) || (blockY >= 64)) return 0;
-    d = jj1_level_data(stage);
-    return d.events[((u16)blockY << 8) + blockX];
+    return lvl(stage)->events[((u16)blockY << 8) + blockX];
 }
 
 /* JJ1 masks are 8x8 cells per 32x32 block: one bit is a 4x4-pixel collision
@@ -50,19 +112,21 @@ u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY)
  * event that owns it. */
 static u8 bridge_deck(u8 stage, s16 cellX, s16 cellY)
 {
-    Jj1LevelData d = jj1_level_data(stage);
+    const Jj1LevelData *d = lvl(stage);
     s16 blockY = (s16)((u16)cellY >> 3);
     s16 blockX = (s16)(cellX >> 3);
     s16 px = (s16)(cellX << 2);            /* left edge of this mask cell */
     s16 py = (s16)(cellY << 2);
     s16 scan;
-    if ((blockY < 0) || (blockY > 63)) return 0;
+    if (!L.hasBridge || (blockY < 0) || (blockY > 63)) return 0;
+    if (!(L.bridgeRows[blockY >> 3] & (1 << (blockY & 7)))) return 0;
     /* A span is at most 255 px, so eight blocks back always covers it. */
     for (scan = blockX; (scan >= 0) && (scan > blockX - 9); scan--) {
-        const Jj1EventInfo *info =
-            jj1_event_info(stage, d.events[(((u16)blockY) << 8) + scan]);
+        u8 e = d->events[(((u16)blockY) << 8) + scan];
+        const Jj1EventInfo *info;
         s16 startX, deckY, span;
-        if (info->klass != JJ1_CLASS_BRIDGE) continue;
+        if ((e >= 128) || (L.klass[e] != JJ1_CLASS_BRIDGE)) continue;
+        info = jj1_event_info(stage, e);
         startX = (s16)(scan << 5);
         span = (s16)((s16)info->param * (s16)info->strength);
         deckY = (s16)((blockY << 5) + info->points);
@@ -74,13 +138,13 @@ static u8 bridge_deck(u8 stage, s16 cellX, s16 cellY)
 
 static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
 {
-    Jj1LevelData d;
+    const Jj1LevelData *d;
     u8 block;
     if ((cellX < 0) || (cellX >= (256 * 8)) || (cellY < 0) || (cellY >= (64 * 8))) return 1;
-    d = jj1_level_data(stage);
+    d = lvl(stage);
     {
-        u8 event = d.events[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
-        u8 klass = jj1_event_info(stage, event)->klass;
+        u8 event = d->events[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
+        u8 klass = (event < 128) ? L.klass[event] : 0;
         /* One-way platforms (JJ1 modifier 6, grid event 122): only downward
            feet probes may land. */
         if (!allowOneWay && (klass == JJ1_CLASS_ONEWAY)) return 0;
@@ -92,9 +156,9 @@ static u8 jj1_runtime_mask_cell(u8 stage, s16 cellX, s16 cellY, u8 allowOneWay)
         if (klass == JJ1_CLASS_BRIDGE) return allowOneWay ? bridge_deck(stage, cellX, cellY) : 0;
     }
     if (allowOneWay && bridge_deck(stage, cellX, cellY)) return 1;
-    block = d.blocks[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
+    block = d->blocks[(((u16)cellY >> 3) << 8) + (cellX >> 3)];
     if (block >= 240) return 0;
-    return (d.masks[((u16)block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? 1 : 0;
+    return (d->masks[((u16)block << 3) + (cellY & 7)] & (1 << (cellX & 7))) ? 1 : 0;
 }
 
 u8 jj1_runtime_point_solid(u8 stage, s16 x, s16 y)
@@ -105,6 +169,42 @@ u8 jj1_runtime_point_solid(u8 stage, s16 x, s16 y)
 u8 jj1_runtime_down_point_solid(u8 stage, s16 x, s16 y)
 {
     return jj1_runtime_mask_cell(stage, x >> 2, y >> 2, 1);
+}
+
+/* Solid for the game: the mask says so and the 32 px block has not been shot
+ * away (destroyed: the game's bit per grid cell).  Off-grid blocks cannot be
+ * destroyed. */
+static u8 block_destroyed(const u8 *destroyed, s16 gx, s16 gy)
+{
+    u16 bit;
+    if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) return 0;
+    bit = ((u16)gy << 8) + (u16)gx;
+    return (u8)((destroyed[bit >> 3] >> (bit & 7)) & 1);
+}
+
+u8 jj1_runtime_bridge_deck(u8 stage, s16 cellX, s16 cellY)
+{
+    return bridge_deck(stage, cellX, cellY);
+}
+
+u8 jj1_runtime_point_solid_d(u8 stage, s16 x, s16 y, u8 allowOneWay, const u8 *destroyed)
+{
+    if (!jj1_runtime_mask_cell(stage, x >> 2, y >> 2, allowOneWay)) return 0;
+    return !block_destroyed(destroyed, x >> 5, y >> 5);
+}
+
+/* Every 4 px mask cell the rectangle touches (the caller has checked that it
+ * lies inside the world). */
+u8 jj1_runtime_rect_solid_d(u8 stage, s16 x, s16 y, s16 w, s16 h, const u8 *destroyed)
+{
+    s16 cx, cy;
+    s16 cx0 = x >> 2, cx1 = (s16)((x + w - 1) >> 2);
+    s16 cy0 = y >> 2, cy1 = (s16)((y + h - 1) >> 2);
+    for (cy = cy0; cy <= cy1; cy++)
+        for (cx = cx0; cx <= cx1; cx++)
+            if (jj1_runtime_mask_cell(stage, cx, cy, 0) &&
+                !block_destroyed(destroyed, cx >> 3, cy >> 3)) return 1;
+    return 0;
 }
 
 u8 jj1_runtime_rect_solid(u8 stage, s16 x, s16 y, s16 w, s16 h)
@@ -208,10 +308,10 @@ u8 jj1_runtime_touches_end(u8 stage, s16 x, s16 y, s16 w, s16 h)
 
 void jj1_runtime_place_player(JazzGame *state, u8 stage)
 {
-    Jj1LevelData d = jj1_level_data(stage);
+    const Jj1LevelData *d = lvl(stage);
     s16 spawnY;
-    s16 spawnX = ((s16)d.startX << 5) + 8;
-    spawnY = ((s16)d.startY << 5) - 22;
+    s16 spawnX = ((s16)d->startX << 5) + 8;
+    spawnY = ((s16)d->startY << 5) - 22;
     if (spawnY < 0) spawnY = 0;
     /* The JJ1 start record names the spawn grid point; settle it against the
        real mask so Jazz begins on the actual slope/platform surface. */

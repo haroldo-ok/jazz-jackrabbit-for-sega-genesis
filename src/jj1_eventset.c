@@ -139,7 +139,7 @@ static const Jj1EventInfo *const jj1_eventsets[JAZZ_STAGE_COUNT] = {
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 {
-    static const Jj1EventInfo none = { JJ1_CLASS_NONE, 0, 0, 0 };
+    static const Jj1EventInfo none = { JJ1_CLASS_NONE, 0, 0, 0, 0 };
     if (id >= 128) return &none;
     if (stage >= JAZZ_STAGE_COUNT) stage = 0;
     return &jj1_eventsets[stage][id];

@@ -289,3 +289,26 @@ PASS: headless emulator P2P: hero=3695, sky=8533, terrain=897, anim=30853, scrol
   they score rather than heal or grant ammo. Which one is the carrot and which
   is the rapid-fire is in the event records - regenerate with `--eventset`
   (the importer now also derives destructible strength from behaviour 21).
+
+
+## Latest run (palette cycling, event sounds, status panel, optimisations)
+
+- Host tests (`tests/run_host_tests.sh` with `JJ1_DATA` set): all PASS.
+- Headless emulator (`tests/run_headless_emulator_test.sh`): all PASS, including the on-target self-test marker (which now covers palette cycling), music, stage select, and the bonus level.
+- Measured on stage 0 under the emulator: about 13 ms of work per frame (was over 20 ms); stage 2 about 8 ms. Bonus floor render about 48 ms (was 66 ms).
+- Not tested: real hardware, and the sound effects by ear. Only the data and playback path were exercised.
+
+After merging with the remote's scenes/saves/options/bonus-player work: host tests, the headless suite, and the menu, bonus-player and scene emulator tests all pass on the merged ROM. `run_presentation_emulator_test.sh` fails with "episode artwork/text missing" on the unmerged remote ROM as well, so it is not caused by the merge.
+
+Bonus-level floor check: with the game stepped a fixed amount and the same held input, the merged ROM's whole frame (floor, hero, items, HUD) is pixel-identical to the remote's renderer after 25 and 70 steps. A hand-written near/far shortcut that changed the distant floor was removed.
+
+## Optimisation pass
+
+- Host tests: all PASS. A host trace (7 stages x 6000 frames of random input, hashing player, enemies, bullets, score and destroyed blocks every frame) is identical before and after the game-core changes.
+- `tests/run_headless_emulator_test.sh`: all PASS, including two new checks:
+  - step 10: `BONUS_SELFTEST` build, the assembly floor equals the C reference at all 1024 angles x 6 positions (6144 cases, SRAM marker `FLOR`,1);
+  - step 11: `JAZZ_MAPCHECK` + `JAZZ_AUTOPILOT` build, plane A read back from VRAM after every camera update for 800 iterations on stages 0 and 3 (SRAM marker `MAPC`,1). Run by hand on all seven stages: no mismatches (the previous build had some on stages 0 and 2).
+- Bonus floor and items: fixed-step builds match the original renderer pixel for pixel after 25 and 70 steps.
+- Menu, bonus-player and scene emulator tests: PASS.
+- `run_presentation_emulator_test.sh` now gets past the episode-ending checks but fails "loss white-out missing": it expects the bonus floor at frame 180 and full white at frame 234. The previous build fails the same assertion (its bonus also starts earlier than the test assumes); in the new build the white-out is complete at frame 200. The test's fixed frame numbers are out of date. `run_shot_emulator_test.sh` prints nothing on either build.
+- Not tested on real hardware.

@@ -174,3 +174,39 @@ rms, peak = float(m.group(1)), int(m.group(2))
 assert rms > 300 and peak > 3000, f"bonus music not playing (rms={rms}, peak={peak})"
 print(f"PASS: bonus music plays (rms={rms:.0f}, peak={peak})")
 PY
+
+# 10. Bonus floor renderer: the assembly rows (src/floor_asm.s) must equal the
+#     C reference word for word at all 1024 angles and six positions.  The
+#     BONUS_SELFTEST build checks this on the 68000 when BONUS 1 starts and
+#     reports 'F','L','O','R',1 through SRAM.
+PATH="$GDK/bin:$PATH" make -C "$ROOT" release GDK="$GDK" PREFIX="$PREFIX" \
+  EXTRA_FLAGS="-DBONUS_SELFTEST" >/dev/null
+cp "$ROOT/out/rom.bin" "$TMP/floorself.bin"
+PATH="$GDK/bin:$PATH" make -C "$ROOT" clean GDK="$GDK" PREFIX="$PREFIX" >/dev/null
+SRAM_LINE="$("$TMP/libretro_harness" "$CORE" "$TMP/floorself.bin" 60010 \
+  "$IS,360-390:start,430-460:start,shot@60000" "$ART/floorself_" | tail -n 1)"
+case "$SRAM_LINE" in
+  *"46 4C 4F 52 01"*|*"46 FF 4C FF 4F FF 52 FF 01"*)
+    echo "PASS: bonus floor assembly matches the C reference at every angle" ;;
+  *) echo "FAIL: bonus floor self-test ($SRAM_LINE)"; exit 1 ;;
+esac
+
+# 11. Map streaming: an autopilot build plays 800 iterations and, after every
+#     camera update, reads plane A back from VRAM to check that each visible
+#     cell shows the cached copy of the right block.  Stages 0 (slopes) and 3
+#     (the busiest block mix) are checked.
+PATH="$GDK/bin:$PATH" make -C "$ROOT" release GDK="$GDK" PREFIX="$PREFIX" \
+  EXTRA_FLAGS="-DJAZZ_MAPCHECK -DJAZZ_AUTOPILOT" >/dev/null
+cp "$ROOT/out/rom.bin" "$TMP/mapcheck.bin"
+PATH="$GDK/bin:$PATH" make -C "$ROOT" clean GDK="$GDK" PREFIX="$PREFIX" >/dev/null
+for st in 0 3; do
+  MS="65-80:start,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
+  for ((i = 0; i < st; i++)); do a=$((260 + i * 10)); MS="$MS,$a-$((a + 5)):up"; done
+  SRAM_LINE="$("$TMP/libretro_harness" "$CORE" "$TMP/mapcheck.bin" 6000 \
+    "$MS,360-390:start,430-460:start,shot@5990" "$ART/mapcheck${st}_" | tail -n 1)"
+  case "$SRAM_LINE" in
+    *"4D 41 50 43 01"*|*"4D FF 41 FF 50 FF 43 FF 01"*)
+      echo "PASS: stage $st map streaming shows the right blocks" ;;
+    *) echo "FAIL: stage $st map check ($SRAM_LINE)"; exit 1 ;;
+  esac
+done

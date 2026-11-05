@@ -193,6 +193,33 @@ python3 tools/build_sgdk_font.py --input ~/jazz/JAZZ/FONT2.0FN --output res/jj1_
 - `tests/test_game_core.c` — host point-to-point assertions.
 - `tests/run_emulator_test.sh` — emulator P2P capture/assertion.
 
+## Latest additions
+
+- **Palette cycling** (`tools/jj1_cycle.py`): the original's seven rotating colour ranges (water, lava, sky shimmer) are gated by each level's background type, packed into up to seven rotating palette slots, and stepped at the original rates at runtime (`update_palette_cycles` in `src/main.c`). An on-target self-test checks the rotation.
+- **Cycling plan**: ranges qualify by how colourful and how visibly animated their pixels are (greys and blacks are skipped); groups are cut at the offset that makes the ring move most and coloured by pixel usage, so Medivo's lava (red/yellow/orange) and rain both visibly move.
+- **Event sounds**: the sound index stored in each event record (item taken, enemy killed, block broken) selects one of the 22 SOUNDS.000 clips via `jj1_event_sfx()` in `inc/jj1_sfx.h`; clips that already had an id are reused, 11 more are registered.
+- **Status panel** (`tools/build_sgdk_panel.py`): metal plate, score/gem/lives boxes with yellow digits, lives and gem icons from PANEL.000, and hearts for health. The hearts and digit glyphs are redrawn, not copied, because the originals do not map onto 8x8 tiles. The tiles sit in the unused lowercase font slots.
+- **Performance**: queued DMA for per-frame uploads, per-stage event/class caches, persistent item tile slots, HUD rebuild only on change, off-screen enemy culling. Profiling builds use `-DJAZZ_PROFILE` (main game: per-section times, missed frames) and `-DBONUS_PROF` (bonus level).
+
+### Optimisation pass (bonus levels 10 -> 30 fps, main levels far fewer dropped frames)
+
+Every change keeps the output identical; each is checked as noted.
+
+- **Bonus floor as tilemaps** (`src/bonus_view.c`): two horizontally adjacent 4x4 samples form the top half of one of 256 preloaded "pair" tiles. Plane B shows the even sample rows; plane A, scrolled 4 lines down, shows the odd ones. The floor costs 800 map words per frame (two DMAs of 1280 bytes) instead of 12.8 KB of tile pixels, which used to overflow vblank and halt the CPU. The sky and strip now turn with per-tile horizontal scroll so the floor rows stay put.
+- **Bonus floor inner loop** (`src/floor_asm.s`): positions only keep their place inside the current floor tile, with guard bits so the carry flag fires exactly at a tile crossing; the tile lookup happens only then. Rows are walked in whichever direction makes both steps positive (four variants), the left sample of each pair reads a pre-shifted texel copy (`res/bonus/tiles_hi.bin`), and one call renders all 20 rows. Checked: `-DBONUS_SELFTEST` compares it word for word with the C reference (`render_floor_c`) at all 1024 angles and six positions; fixed-step builds (`-DBONUS_FIXSTEP=n -DBONUS_STOPAT=n`) match the original renderer's frames pixel for pixel.
+- **Bonus items**: an assembly scan lists the few non-empty event cells; the projection then uses exact 16x16 multiplies, a cheap exact off-screen test before the division, an exact small-quotient division and exact size-class thresholds. The removed-item check has a per-row filter.
+- **Exact 16-bit arithmetic**: GCC calls libgcc's `__mulsi3`/`__modsi3`/`__divsi3` for many products and remainders the 68000 can do with one `muls`/`mulu`/`divu`; the hot ones (floor rows, item projection, sprite animation frames) now use small inline-asm helpers.
+- **Collision probes** (`src/game_core.c`, `src/jj1_runtime.c`): the game probes several points per pixel moved; each probe was two cross-file calls. It now reads the runtime's cached tables inline (`Jj1Fast`), bridge scans only run on rows that hold a bridge, rectangle tests walk the 4 px cells once, and grid scans use the class table instead of two calls per cell. Checked: a host trace of 7 stages x 6000 frames of random input (player, enemies, bullets, score, destroyed blocks) is identical before and after.
+- **Map streaming** (`src/main.c`): the block cache has a reverse map and a per-window visibility stamp instead of a 64-slot search plus an 88-cell scan per eviction candidate, and map rows are written with one VDP address per four cells (auto-increment set explicitly). Checked: `-DJAZZ_MAPCHECK -DJAZZ_AUTOPILOT` reads plane A back from VRAM after every camera update; stages 0-6 show no wrong block.
+
+Measured under Genesis Plus GX: bonus levels went from 6 vblanks per frame (10 fps) to 2 (30 fps). On the main levels, with identical autopilot input, missed frames over the same run dropped from roughly 900 to 169 on stage 0 and from about 600 to 149 on stage 3; stages 5 and 6 now miss none. Some heavy frames on stages 0 and 3 still miss a vblank.
+
+Test-only build flags: `-DJAZZ_AUTOPILOT` (input from the play iteration, so builds of different speed play the same game), `-DJAZZ_FIXED_PACE=n` (each loop iteration takes n frames), `-DJAZZ_MAPCHECK`, `-DBONUS_SELFTEST`.
+
+New files: `src/floor_asm.s`, `tools/jj1_cycle.py`, `tools/build_sgdk_panel.py`, `res/jj1_hud.*`, `res/bonus/tiles_hi.bin`. The ROM is about 3.9 MB (header end 0x3FFFFF).
+
+The remaining original fonts (FONTBIG, FONTINY, FONTMN1, FONTMN2) are still not converted.
+
 ## Roadmap toward a faithful OpenJazz-based port
 
 1. Build a host-side importer for legally supplied JJ1 data (`LEVEL*.###`, `MAINCHAR.000`, `PANEL.000`, palette and sound files).

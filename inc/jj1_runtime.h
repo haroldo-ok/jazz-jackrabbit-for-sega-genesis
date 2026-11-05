@@ -51,6 +51,29 @@ extern const u8 jj1_level7_masks[(240 + 16) * 8];
 extern const u16 jj1_level7_start_x, jj1_level7_start_y;
 
 u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY);
+const u8 *jj1_runtime_events(u8 stage);   /* the 256x64 event grid */
+u8 jj1_runtime_klass(u8 stage, u8 id);   /* cached event class by id */
+const u8 *jj1_runtime_klass_table(u8 stage); /* the same, as a 128-entry table */
+/* The cached tables of one stage, for collision probes that cannot afford a
+ * cross-file call each (the game core probes several points per pixel moved).
+ * Valid until another stage is queried. */
+typedef struct {
+    const u8 *events;       /* 256 x 64 event grid */
+    const u8 *blocks;       /* 256 x 64 block grid */
+    const u8 *masks;        /* 8 bytes of 4 px cells per block */
+    const u8 *klass;        /* event class by id, 128 entries */
+    const u8 *bridgeRows;   /* bit per grid row holding a bridge */
+    u8 stage;
+    u8 hasBridge;
+} Jj1Fast;
+const Jj1Fast *jj1_runtime_fast(u8 stage);
+/* Is the 4 px mask cell part of a bridge deck (only call for rows marked in
+ * bridgeRows). */
+u8 jj1_runtime_bridge_deck(u8 stage, s16 cellX, s16 cellY);
+/* Point / rectangle solidity including blocks the game has destroyed
+ * (destroyed = JazzGame.destroyed, one bit per grid cell). */
+u8 jj1_runtime_point_solid_d(u8 stage, s16 x, s16 y, u8 allowOneWay, const u8 *destroyed);
+u8 jj1_runtime_rect_solid_d(u8 stage, s16 x, s16 y, s16 w, s16 h, const u8 *destroyed);
 u8 jj1_runtime_point_solid(u8 stage, s16 x, s16 y);
 u8 jj1_runtime_down_point_solid(u8 stage, s16 x, s16 y);
 u8 jj1_runtime_rect_solid(u8 stage, s16 x, s16 y, s16 w, s16 h);

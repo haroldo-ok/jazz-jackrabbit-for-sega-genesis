@@ -68,6 +68,10 @@ typedef struct {
      * (JJ1LevelPlayer::touchEvent's default case), otherwise the crate has to
      * be shot open and takeEvent grants the contents. */
     u8 strength;
+    /* Index into the original SOUNDS.000 (1-based, 0 = silent) of the clip the
+     * event plays when it is destroyed: the sound an item makes when taken, an
+     * enemy when it dies, a block when it breaks. */
+    u8 sound;
 } Jj1EventInfo;
 
 const Jj1EventInfo *jj1_event_info(u8 stage, u8 id);

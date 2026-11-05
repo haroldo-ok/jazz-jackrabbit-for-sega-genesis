@@ -1,8 +1,12 @@
 /* Genesis front end for the JJ1 bonus levels.
  *
- * The floor is the original's perspective texture map, sampled at 80x20 and
- * written 4x4 pixels per sample straight into a RAM tile buffer that is
- * DMA'd to VRAM each frame.  Items are the original gem/clock/glove/exit
+ * The floor is the original's perspective texture map, sampled at 80x20 with
+ * each sample a 4x4 pixel block.  Two horizontally adjacent samples make the
+ * top half of one of 256 preloaded "pair" tiles (colour a | colour b, bottom
+ * half transparent), so the floor is drawn as tilemaps only: plane B carries
+ * the even sample rows, plane A - scrolled 4 lines down - the odd ones, each
+ * row's opaque top half covering the other plane's transparent bottom half.
+ * Per frame that is 800 map words instead of 12.8 KB of tile pixels.  Items are the original gem/clock/glove/exit
  * graphics, pre-scaled to four sprite sizes. The player is the original
  * 72x88 bonus animation, streamed as a nine-sprite VDP composite. */
 #include <genesis.h>
@@ -22,22 +26,91 @@
 #define FLOOR_TOP_ROW 18            /* tile row where the floor starts (y = 144) */
 
 #define T_FLOOR   T_JJ1_BLOCK_CACHE
-#define T_STRIP   (T_FLOOR + FLOOR_TILES)
+#define T_PAIR    1024              /* 256 pair tiles; low byte of the index is 0 */
+#define T_STRIP   T_FLOOR
 #define T_ITEMS   (T_STRIP + 192)
 #define ITEM_TILES 30               /* 16 + 9 + 4 + 1 per item type */
 #define T_HERO    (T_ITEMS + 4 * ITEM_TILES)
 #define HERO_TILES 99
 #define T_SKY     (T_HERO + HERO_TILES)    /* 15 solid tiles, one per gradient row */
 
-typedef char bonus_vram_fits[(T_SKY + 15 <= JJ1_VRAM_TILE_LIMIT) ? 1 : -1];
+typedef char bonus_vram_fits[(T_SKY + 15 <= T_PAIR) ? 1 : -1];
+typedef char bonus_pair_fits[(T_PAIR + 256 <= JJ1_VRAM_TILE_LIMIT) ? 1 : -1];
+#define PAIR_WORD TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, T_PAIR)
 
 #define SFX_BONUS_GOD 77            /* XGM PCM ids; the main game uses 64-76 */
 #define SFX_BONUS_OW  68            /* shared with the main game's "ow" */
 
 #define MUL(x, y) ((s32)(((s32)(x) * (s32)(y)) >> 10))
 
-static u8 floorBuf[FLOOR_TILES * 32] __attribute__((aligned(2)));
-static u16 quadTab[16];     /* palette index -> four identical 4bpp pixels */
+/* MUL(x, c) for a sine/cosine c (|c| <= 1024) with two 16x16 hardware
+ * multiplies instead of libgcc's 32x32 routine.  x = hi * 32768 + lo, so
+ * x * c = ((hi * c) << 15) + lo * c, which wraps exactly like the 32-bit
+ * product as long as hi fits 16 bits (|x| < 2^30). */
+/* 16 x 16 -> 32 signed multiply.  GCC calls libgcc's __mulsi3 for these
+ * when the operands have been widened to int; muls.w is several times
+ * faster. */
+static inline s32 muls16(s16 a, s16 b)
+{
+    s32 r = a;
+    __asm__("muls.w %1,%0" : "+d"(r) : "d"(b));
+    return r;
+}
+
+static inline s32 mulc(s32 x, s16 c)
+{
+    s16 hi = (s16)(x >> 15), lo = (s16)(x & 32767);
+    return (s32)((muls16(hi, c) << 15) + muls16(lo, c)) >> 10;
+}
+
+static inline u32 mulu16(u16 a, u16 b)
+{
+    u32 r = a;
+    __asm__("mulu.w %1,%0" : "+d"(r) : "d"(b));
+    return r;
+}
+
+static inline u32 divuw(u32 a, u16 d)
+{
+    __asm__("divu.w %1,%0" : "+d"(a) : "d"(d));
+    return a & 0xFFFF;
+}
+
+/* n / d (truncating like C) for d > 0 and |n| < 768 d, i.e. a quotient
+ * that fits 10 bits.  A divisor over 16 bits is shifted down and rounded up,
+ * which can only make the estimate one too small; one multiply fixes it. */
+static inline s32 div_small(s32 n, s32 d)
+{
+    u32 a = (u32)((n < 0) ? -n : n), q;
+    if (d < 65536) q = divuw(a, (u16)d);
+    else {
+        u32 dd = (u32)d;
+        u8 sh = 0;
+        while (dd >= 32768) { dd >>= 1; sh++; }
+        q = divuw(a >> sh, (u16)(dd + 1));
+        {
+            u16 q1 = (u16)(q + 1);
+            u32 p = mulu16(q1, (u16)((u32)d & 0xFFFF)) + (mulu16(q1, (u16)((u32)d >> 16)) << 16);
+            if (p <= a) q++;
+        }
+    }
+    return (n < 0) ? -(s32)q : (s32)q;
+}
+
+/* x / 80 for |x / 80| < 32768, truncating like C, with one divs. */
+static inline s32 div80(s32 x)
+{
+    s32 q = x;
+    __asm__("divs.w #80,%0" : "+d"(q));
+    return (s16)q;
+}
+
+/* Tilemap rows of the floor: [0] even sample rows (plane B), [1] odd (plane A).
+ * Rows are as wide as the 64-cell planes, so each plane's floor is one DMA. */
+#define PLANE_W 64
+static u16 floorMap[2][FLOOR_ROWS][PLANE_W];
+static const u8 *tbase[60];         /* texels of each floor tile */
+static const u8 *tbaseHi[60];       /* the same, texels << 4 */
 static s32 rowDist[SAMPLES_Y];
 static BonusGame bg;
 
@@ -60,76 +133,181 @@ static u16 draw_player(u16 count, s16 zpx)
     return count;
 }
 
-static void render_floor(const BonusGame *b)
+/* One row of FLOOR_COLS map words (src/floor_asm.s).  The four variants
+ * cover the step directions; see the comment there. */
+extern void floor_row_fwd(void), floor_row_fwd_m(void), floor_row_rev(void), floor_row_rev_m(void);
+extern void floor_rows(const u32 *params, u32 rows, const u8 *grid, const u8 *const *tbase,
+                       u32 word, const u8 *const *tbaseHi);
+
+/* Row set-up shared by both renderers: start position and step in 1/1024 px. */
+#define ROW_SETUP()                                                              \
+    s32 d = rowDist[sy];                                                         \
+    s32 sideX = mulc(d, cs), sideY = mulc(d, sn);                                \
+    /* MUL(d - 16384, c) = MUL(d, c) - 16 c exactly: 16384 c is a multiple   \
+       of 1024. */                                                               \
+    s32 ur = b->x + (sideY - 16 * sn) - (sideX >> 1);                            \
+    s32 vr = b->y - (sideX - 16 * cs) - (sideY >> 1);                            \
+    s32 dur = div80(sideX), dvr = div80(sideY);                                  \
+    u16 *o = floorMap[sy & 1][sy >> 1]
+
+/* The reference: every sample looks its tile up from scratch.  Pixel = raw
+ * position >> 10, tile = pixel >> 5, both wrapping at 256 tiles. */
+static void __attribute__((unused)) render_floor_c(const BonusGame *b)
 {
-    const s32 sn = bonus_sin(b->direction), cs = bonus_cos(b->direction);
-    const u8 *tbase[60];
+    const s16 sn = (s16)bonus_sin(b->direction), cs = (s16)bonus_cos(b->direction);
     const u8 *grid = b->grid;
-    u8 sy, t;
-    for (t = 0; t < 60; t++) tbase[t] = b->floorTiles + ((u16)t << 10);
+    u8 sy;
     for (sy = 0; sy < SAMPLES_Y; sy++) {
-        s32 d = rowDist[sy];
-        s32 sideX = MUL(d, cs), sideY = MUL(d, sn);
-        /* positions in 16.16 so the pixel is simply the high word */
-        s32 u = (b->x + MUL(d - 16384, sn) - (sideX >> 1)) << 6;
-        s32 v = (b->y - MUL(d - 16384, cs) - (sideY >> 1)) << 6;
-        s32 du = (sideX / SAMPLES_X) << 6, dv = (sideY / SAMPLES_X) << 6;
-        /* sample row sy covers pixel rows 4*sy..4*sy+3: tile row sy>>1, rows (sy&1)*4.. */
-        u8 *o = floorBuf + ((((sy >> 1) * FLOOR_COLS) * 8) + ((sy & 1) * 4)) * 4;
-        u8 n;
-        u16 lastKey = 0xFFFF;
-        const u8 *tp = tbase[0];
+        ROW_SETUP();
+        u8 n, k;
         for (n = 0; n < FLOOR_COLS; n++) {
-            u8 k;
+            u16 w = 0;
             for (k = 0; k < 2; k++) {
-                /* High word of the 16.16 coordinate; avoid type-punning. */
-                u16 px = (u16)((u32)u >> 16) & 8191, py = (u16)((u32)v >> 16) & 8191;
-                u16 key = ((py & 0x1FE0) << 3) | (px >> 5);
-                u16 quad;
-                u16 *w;
-                /* neighbouring samples almost always share a floor tile */
-                if (key != lastKey) { lastKey = key; tp = tbase[grid[key]]; }
-                quad = quadTab[tp[((py & 31) << 5) | (px & 31)]];
-                w = (u16 *)(o + k * 2);
-                w[0] = quad; w[2] = quad; w[4] = quad; w[6] = quad;
-                u += du; v += dv;
+                u16 pu = (u16)(ur >> 10), pv = (u16)(vr >> 10);
+                const u8 *tp = tbase[grid[((pv << 3) & 0xFF00) | ((pu >> 5) & 0xFF)]];
+                w = (u16)((w << 4) | tp[((pv & 31) << 5) | (pu & 31)]);
+                ur += dur; vr += dvr;
             }
-            o += 32;
+            *o++ = (u16)(PAIR_WORD | (w & 0xFF));
         }
     }
 }
 
-typedef struct { s16 x; u8 ev; u8 size; s32 div; } Seen;
+static void __attribute__((unused)) render_floor(const BonusGame *b)
+{
+    /* per row: routine, out, U, V, dU, dV, key, texels, texelsHi */
+    static u32 params[SAMPLES_Y][9];
+    const s16 sn = (s16)bonus_sin(b->direction), cs = (s16)bonus_cos(b->direction);
+    const u8 *grid = b->grid;
+    u8 sy;
+    for (sy = 0; sy < SAMPLES_Y; sy++) {
+        ROW_SETUP();
+        void (*fn)(void);
+        u8 mirror;
+        u16 key;
+        const u8 *tp, *tph;
+        u32 *pr = params[sy];
+        if (dur < 0) {          /* walk the row from its right end */
+            ur += 79 * dur; vr += 79 * dvr; dur = -dur; dvr = -dvr;
+            mirror = (dvr < 0);
+            fn = mirror ? floor_row_rev_m : floor_row_rev;
+        } else {
+            mirror = (dvr < 0);
+            fn = mirror ? floor_row_fwd_m : floor_row_fwd;
+        }
+        key = (u16)((((u32)vr >> 7) & 0xFF00) | (((u32)ur >> 15) & 0xFF));
+        tp = tbase[grid[key]];
+        tph = tbaseHi[grid[key]];
+        if (mirror) {
+            /* v' = (2^23 - 1) - v: pixel' = 8191 - pixel, so the texel row
+               and the tile row both count down while v' counts up. */
+            vr = 0x7FFFFF - (vr & 0x7FFFFF);
+            dvr = -dvr;
+            tp += 0x3E0;
+            tph += 0x3E0;
+        }
+        pr[0] = (u32)fn;
+        pr[1] = (u32)o;
+        pr[2] = 0xFFE00000UL | ((u32)(ur & 0x7FFF) << 6);
+        pr[3] = 0xFC000000UL | ((u32)(vr & 0x7FFF) << 11);
+        pr[4] = (u32)dur << 6;
+        pr[5] = (u32)dvr << 11;
+        pr[6] = (u16)(key ^ 0x8000);
+        pr[7] = (u32)tp;
+        pr[8] = (u32)tph;
+    }
+    floor_rows(params[0], SAMPLES_Y, grid + 0x8000, tbase, PAIR_WORD, tbaseHi);
+}
 
-static u16 draw_items(const BonusGame *b, u16 count)
+/* Planes for the floor: B keeps hscroll 0 below the strip, A is shifted 4
+ * lines down so its rows interleave with B's. */
+static void floor_upload(void)
+{
+    DMA_queueDma(DMA_VRAM, floorMap[0][0], VDP_getPlaneAddress(BG_B, 0, FLOOR_TOP_ROW),
+                 FLOOR_ROWS * PLANE_W, 2);
+    DMA_queueDma(DMA_VRAM, floorMap[1][0], VDP_getPlaneAddress(BG_A, 0, FLOOR_TOP_ROW),
+                 FLOOR_ROWS * PLANE_W, 2);
+}
+
+static void load_pair_tiles(void)
+{
+    static u32 pair[16][8];         /* one second-colour group at a time */
+    u8 a, b2, y;
+    for (a = 0; a < 16; a++) {
+        for (b2 = 0; b2 < 16; b2++) {
+            u32 row = ((u32)a * 0x11110000UL) | ((u32)b2 * 0x1111UL);
+            for (y = 0; y < 4; y++) pair[b2][y] = row;
+            for (y = 4; y < 8; y++) pair[b2][y] = 0;
+        }
+        VDP_loadTileData(pair[0], T_PAIR + a * 16, 16, CPU);
+    }
+}
+
+typedef struct { s16 x; u8 ev; u8 size; s32 div; } Seen;
+extern u32 bonus_scan(const u8 *events, u32 ty0, u32 tyStep, u32 col0, u32 colStep, u8 *hits);
+#ifdef BONUS_PROF
+u16 profItems;
+u32 profScan;
+#endif
+
+static u16 __attribute__((noinline)) draw_items(const BonusGame *b, u16 count)
 {
     Seen seen[40];
     u8 n = 0, i, j;
-    const s32 sn = bonus_sin(b->direction), cs = bonus_cos(b->direction);
+    const s16 sn = (s16)bonus_sin(b->direction), cs = (s16)bonus_cos(b->direction);
     s32 px = b->x, py = b->y;
-    int y, x;
-    for (y = -6; y < 6; y++) {
-        int evY = (((b->direction - 256) & 512) ? y : -y);
-        s32 sY = ((s32)evY << 15) + 16384 - (py & 32767);
-        for (x = -6; x < 6; x++) {
-            int evX = ((b->direction & 512) ? x : -x);
-            s32 sX = ((s32)evX << 15) + 16384 - (px & 32767);
-            s32 div = 16384 + MUL(sX, sn) - MUL(sY, cs);
-            u8 ev;
-            if ((div >> 10) <= 8) continue;
-            ev = bonus_event(b, evX + (int)(px >> 15), evY + (int)(py >> 15));
-            if (ev && b->evType[ev & 15] > 0 && b->evType[ev & 15] != 5 && n < 40) {
-                s32 nX = ((MUL(sX, cs) + MUL(sY, sn)) << 10) / div;
-                s32 scr = ((nX * 320) >> 10) + 160;
-                s32 scale = (s32)((65536L << 10) / div);          /* 1024 = 1.0 */
-                s32 pxsize = (24 * scale) >> 10;
-                u8 size = (pxsize >= 28) ? 0 : (pxsize >= 20) ? 1 : (pxsize >= 12) ? 2 : 3;
+    /* With sX = (evX << 15) + cx, MUL(sX, c) = evX * c * 32 + MUL(cx, c)
+       exactly (the first product is a multiple of 1024), so the four
+       products per cell become a per-frame constant plus a small multiply. */
+    const s32 cx = 16384 - (px & 32767), cy = 16384 - (py & 32767);
+    const s32 axs = mulc(cx, sn), axc = mulc(cx, cs), ays = mulc(cy, sn), ayc = mulc(cy, cs);
+    const u8 flipY = ((b->direction - 256) & 512) != 0, flipX = (b->direction & 512) != 0;
+    const int baseX = (int)(px >> 15), baseY = (int)(py >> 15);
+    const u8 bx = (u8)baseX;
+    /* Columns run from evX = x0 in steps of colStep, rows likewise. */
+    const s16 x0 = flipX ? -6 : 6, y0 = flipY ? -6 : 6;
+    const s8 colStep = flipX ? 1 : -1, rowStep = flipY ? 1 : -1;
+    u8 hits[144], nh, h;
+    /* Nearly every cell is empty: an assembly scan (src/floor_asm.s) lists
+       the others, row by row, and only those are projected. */
+    nh = (u8)bonus_scan(b->events, (u8)(y0 + baseY), (u32)(s32)rowStep,
+                        (u8)(bx + x0), (u32)(s32)colStep, hits);
+    for (h = 0; h < nh; h++) {
+        {
+            const u8 yk = hits[h] >> 4, k = hits[h] & 15;
+            const s16 evY = (s16)(y0 + (flipY ? yk : -yk));
+            const s16 evX = (s16)(x0 + (flipX ? k : -k));
+            const u8 ty = (u8)(evY + baseY), col = (u8)(evX + bx);
+            const u8 ev = b->events[((u16)ty << 8) | col];
+            s32 div, num, an;
+            div = 16384 + ((muls16(evX, sn) << 5) + axs) - ((muls16(evY, cs) << 5) + ayc);
+            /* div >> 10 <= 8  <=>  div < 9216 */
+            if (div < 9216) continue;
+            num = ((muls16(evX, cs) << 5) + axc) + ((muls16(evY, sn) << 5) + ays);
+            /* |num << 10| >= 768 div  <=>  4 |num| >= 3 div; then |nX| >= 768,
+               which lands at least 80 px off screen either way. */
+            an = (num < 0) ? -num : num;
+            if ((an << 2) >= div + div + div) continue;
+            if ((b->evType[ev & 15] <= 0) || (b->evType[ev & 15] == 5) || (n >= 40)) continue;
+            if (!bonus_event(b, col, ty)) continue;
+            {
+                s32 nX = div_small(num << 10, div);
+                s32 scr = (muls16((s16)nX, 320) >> 10) + 160;   /* |nX| < 768 */
+                /* Size class of pxsize = (24 * ((65536 << 10) / div)) >> 10,
+                   decided by comparing div with the exact break points
+                   (pxsize >= T  <=>  div <= 2^26 / ceil(1024 T / 24)). */
+#define DIV_FOR(T) (67108864L / ((1024L * (T) + 23) / 24))
+                u8 size = (div <= DIV_FOR(28)) ? 0 : (div <= DIV_FOR(20)) ? 1 :
+                          (div <= DIV_FOR(12)) ? 2 : 3;
                 if (scr > -40 && scr < 360) {
                     seen[n].x = (s16)scr; seen[n].ev = ev; seen[n].size = size; seen[n].div = div; n++;
                 }
             }
         }
     }
+#ifdef BONUS_PROF
+    { extern u16 profItems; extern u32 profScan; profItems = n; profScan = getSubTick(); }
+#endif
     /* nearest first, so near items are drawn on top */
     for (i = 1; i < n; i++) {
         Seen t = seen[i];
@@ -151,10 +329,15 @@ static u16 draw_items(const BonusGame *b, u16 count)
     return count;
 }
 
+static u16 hudShownGems, hudShownItems, hudShownTime = 0xFFFF;
+
 static void draw_hud(const BonusGame *b)
 {
     char line[40];
     u16 g = b->gems, t = (b->endTime > b->ticks) ? (u16)((b->endTime - b->ticks) / 1000) : 0;
+    /* the text only changes when a gem is taken or once a second */
+    if (g == hudShownGems && b->items == hudShownItems && t == hudShownTime) return;
+    hudShownGems = g; hudShownItems = b->items; hudShownTime = t;
     u16 secs = t % 60, mins = t / 60;
     line[0] = 'G'; line[1] = 'E'; line[2] = 'M'; line[3] = 'S'; line[4] = ' ';
     line[5] = (char)('0' + (g / 10) % 10); line[6] = (char)('0' + g % 10); line[7] = '/';
@@ -164,6 +347,7 @@ static void draw_hud(const BonusGame *b)
     line[19] = (char)('0' + secs / 10); line[20] = (char)('0' + secs % 10); line[21] = ' '; line[22] = 0;
     VDP_drawTextBG(WINDOW, line, 8, 0);
 #ifdef BONUS_FPS
+    hudShownTime = 0xFFFF;
     { char f[8]; intToStr(SYS_getFPS(), f, 1); VDP_drawTextBG(WINDOW, f, 1, 0); }
 #endif
 }
@@ -187,6 +371,50 @@ static void play_bonus_sound(u8 se)
     else if (se == 4) jj1_sfx_start(SFX_BONUS_OW, 2, SOUND_PCM_CH4);
 }
 
+#ifdef BONUS_SELFTEST
+/* Every angle at several positions: the assembly rows must equal the C
+ * reference word for word.  Shows the result and stops. */
+static void floor_selftest(void)
+{
+    static u16 ref[2][FLOOR_ROWS][PLANE_W];
+    u32 bad = 0, cases = 0;
+    u16 dir;
+    u8 p;
+    char line[40];
+    static const s32 pos[6][2] = {
+        { 0x00104000L, 0x00204000L }, { 0x007FC123L, 0x00000321L }, { 0x00000001L, 0x007FFFFFL },
+        { 0x0034A5A5L, 0x0012F0F0L }, { 0x00400000L, 0x00400000L }, { 0x007ABCDEL, 0x00654321L }
+    };
+    static BonusGame saved;
+    saved = bg;
+    VDP_drawTextBG(WINDOW, "FLOOR SELFTEST...", 1, 0);
+    for (p = 0; p < 6; p++) {
+        bg.x = pos[p][0]; bg.y = pos[p][1];
+        for (dir = 0; dir < 1024; dir++) {
+            u16 i, *a = &floorMap[0][0][0], *c = &ref[0][0][0];
+            bg.direction = dir;
+            render_floor_c(&bg);
+            memcpy(ref, floorMap, sizeof(ref));
+            render_floor(&bg);
+            for (i = 0; i < 2 * FLOOR_ROWS * PLANE_W; i++) if (a[i] != c[i]) bad++;
+            cases++;
+        }
+    }
+    bg = saved;
+    strcpy(line, bad ? "FLOOR SELFTEST BAD " : "FLOOR SELFTEST OK  ");
+    intToStr((s32)(bad > 99999 ? 99999 : bad), line + 19, 1);
+    VDP_drawTextBG(WINDOW, line, 1, 0);
+    intToStr((s32)cases, line, 1);
+    VDP_drawTextBG(WINDOW, line, 1, 1);
+    /* result for tests/run_headless_emulator_test.sh: 'F','L','O','R', 1 = OK */
+    SRAM_enable();
+    SRAM_writeByte(0, 'F'); SRAM_writeByte(1, 'L'); SRAM_writeByte(2, 'O'); SRAM_writeByte(3, 'R');
+    SRAM_writeByte(4, bad ? 2 : 1);
+    SRAM_disable();
+    while (TRUE) SYS_doVBlankProcess();
+}
+#endif
+
 int bonus_play(u8 index, const u8 *music)
 {
     static const u8 *const grids[3] = { jj1_bonus_grid0, jj1_bonus_grid1, jj1_bonus_grid2 };
@@ -196,11 +424,19 @@ int bonus_play(u8 index, const u8 *music)
     const u16 whiteDuration = SYS_isPAL() ? 100 : 120; /* original 2000 ms */
     u16 originalPalettes[64];
     u8 k, row;
+#ifdef BONUS_PROF
+    u32 pScan0 = 0, pScanT = 0, pSortT = 0, pBusy0 = 0, pBusyT = 0, pWaitT = 0;
+    u32 pt0 = 0, pT[4] = { 0, 0, 0, 0 }, steps0 = 0;
+#endif
     u8 loadedPlayerFrame = 0xFF;
 
-    for (k = 0; k < 16; k++) quadTab[k] = (u16)(k | (k << 4) | (k << 8) | (k << 12));
     if (index > 2) index = 0;
     bonus_init(&bg, index, jj1_bonus_tiles, jj1_bonus_masks, grids[index], events[index]);
+    for (k = 0; k < 60; k++) {
+        tbase[k] = bg.floorTiles + ((u16)k << 10);
+        tbaseHi[k] = jj1_bonus_tiles_hi + ((u16)k << 10);
+    }
+    hudShownTime = 0xFFFF;
 #ifdef BONUS_DEBUG_X
     bg.x = ((s32)BONUS_DEBUG_X << 15) + 16384; bg.y = ((s32)BONUS_DEBUG_Y << 15) + 16384;
 #endif
@@ -208,11 +444,11 @@ int bonus_play(u8 index, const u8 *music)
     /* display set-up */
     VDP_setScreenWidth320();
     VDP_setPlaneSize(64, 32, TRUE);
-    VDP_setScrollingMode(HSCROLL_PLANE, VSCROLL_PLANE);
+    VDP_setScrollingMode(HSCROLL_TILE, VSCROLL_PLANE);
     VDP_clearPlane(BG_A, TRUE); VDP_clearPlane(BG_B, TRUE); VDP_clearPlane(WINDOW, TRUE);
     VDP_clearSprites(); VDP_updateSprites(1, DMA);
     VDP_setHorizontalScroll(BG_A, 0); VDP_setHorizontalScroll(BG_B, 0);
-    VDP_setVerticalScroll(BG_A, 0); VDP_setVerticalScroll(BG_B, 0);
+    VDP_setVerticalScroll(BG_A, -4); VDP_setVerticalScroll(BG_B, 0);
     PAL_setPalette(PAL1, jj1_bonus_palette, CPU);
     VDP_setBackgroundColor(0);
     VDP_setWindowOnTop(2);
@@ -250,10 +486,12 @@ int bonus_play(u8 index, const u8 *music)
     for (y = 0; y < 3; y++)
         for (x = 0; x < 64; x++)
             VDP_setTileMapXY(BG_B, TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, T_STRIP + y * 64 + x), x, 15 + y);
-    for (y = 0; y < FLOOR_ROWS; y++)
-        for (x = 0; x < FLOOR_COLS; x++)
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, T_FLOOR + y * FLOOR_COLS + x),
-                             x, FLOOR_TOP_ROW + y);
+    load_pair_tiles();
+    {   /* hscroll per 8-line band: everything still at 0 */
+        static const s16 zero[28] = { 0 };
+        VDP_setHorizontalScrollTile(BG_A, 0, (s16 *)zero, 28, CPU);
+        VDP_setHorizontalScrollTile(BG_B, 0, (s16 *)zero, 28, CPU);
+    }
 
     /* per-row distances of the perspective floor (original formula) */
     for (row = 0; row < SAMPLES_Y; row++) {
@@ -261,6 +499,9 @@ int bonus_play(u8 index, const u8 *music)
         rowDist[row] = (s32)(((819200L) << 0) / (92 - yo));     /* 800/(92-y) in 10-bit fixed point */
     }
 
+#ifdef BONUS_SELFTEST
+    floor_selftest();
+#endif
     PAL_getColors(0, originalPalettes, 64);
     jj1_music_start(music);
     lastTimer = vtimer;
@@ -269,12 +510,24 @@ int bonus_play(u8 index, const u8 *music)
 #endif
 
     while (TRUE) {
+#ifdef BONUS_PROF
+        pt0 = getSubTick();
+#endif
         u16 pad = JOY_readJoypad(JOY_1);
         u16 now = vtimer, elapsed = (u16)(now - lastTimer), steps = elapsed, count = 0;
         s32 zpx;
         lastTimer = now;
         if (steps < 1) steps = 1;
+#ifdef BONUS_FIXSTEP
+        steps = (frame >= BONUS_STOPAT) ? 0 : BONUS_FIXSTEP;
+#endif
         if (steps > 16) steps = 16;
+#ifdef BONUS_FREEZE
+        steps = 0;      /* reproducible frames for comparing renderers */
+#endif
+#ifdef BONUS_PROF
+        steps0 = steps;
+#endif
 
         if (result == BONUS_CONTINUE) {
             while (steps--) {
@@ -292,11 +545,28 @@ int bonus_play(u8 index, const u8 *music)
         }
         frame++;
 
+#ifdef BONUS_PROF
+        pT[0] += getSubTick() - pt0;
+        pt0 = getSubTick();
+#endif
 #ifndef BONUS_NOFLOOR
+#ifdef BONUS_C_FLOOR
+        render_floor_c(&bg);
+#else
         render_floor(&bg);
 #endif
+#endif
+#ifdef BONUS_PROF
+        pT[1] += getSubTick() - pt0;
+        pt0 = getSubTick();
+#endif
         draw_hud(&bg);
-        VDP_setHorizontalScroll(BG_B, -bg.direction);
+        {   /* sky and mountain strip turn with the player; the floor rows don't */
+            static s16 turn[FLOOR_TOP_ROW];
+            u8 i;
+            for (i = 0; i < FLOOR_TOP_ROW; i++) turn[i] = (s16)-bg.direction;
+            VDP_setHorizontalScrollTile(BG_B, 0, turn, FLOOR_TOP_ROW, DMA_QUEUE);
+        }
 
         /* OpenJazz maps player states to BONUSMAP animation slots 0..6.
          * Advance at 75 ms/frame; each slot retains its original frame list. */
@@ -307,17 +577,50 @@ int bonus_play(u8 index, const u8 *music)
             u8 n = jj1_bonus_player_counts[index][anim];
             u8 which = jj1_bonus_player_anims[index][anim][(bg.ticks / 75) % n];
             if (which != loadedPlayerFrame) {
-                VDP_loadTileData(jj1_bonus_player_frames[which], T_HERO, HERO_TILES, CPU);
+                VDP_loadTileData(jj1_bonus_player_frames[which], T_HERO, HERO_TILES, DMA_QUEUE);
                 loadedPlayerFrame = which;
             }
         }
         zpx = (bg.z * 80) >> 10;
         count = draw_player(count, (s16)zpx);
 #ifndef BONUS_NOITEMS
+#ifdef BONUS_PROF
+        pScan0 = getSubTick();
+#endif
         count = draw_items(&bg, count);
+#ifdef BONUS_PROF
+        pScanT += profScan - pScan0; pSortT += getSubTick() - profScan;
+#endif
 #endif
         VDP_setSpriteLink(count - 1, 0);
         VDP_updateSprites(count, DMA_QUEUE);
+#ifdef BONUS_PROF
+        pT[2] += getSubTick() - pt0;
+        pT[3] += steps0;
+        if (!(frame & 7)) {
+            char b[40]; u8 i, n = 0;
+            for (i = 0; i < 4; i++) {
+                u16 v = (u16)((pT[i] / 8) * 13 / 100);
+                if (i == 3) v = (u16)(pT[3] / 8 * 10);
+                b[n++] = (char)('0' + v / 100 % 10); b[n++] = (char)('0' + v / 10 % 10); b[n++] = (char)('0' + v % 10); b[n++] = ' ';
+                pT[i] = 0;
+            }
+            {
+                u16 v1 = (u16)((pScanT / 8) * 13 / 100), v2 = (u16)((pSortT / 8) * 13 / 100);
+                b[n++] = (char)('0' + v1 / 10 % 10); b[n++] = (char)('0' + v1 % 10); b[n++] = ' ';
+                b[n++] = (char)('0' + v2 / 10 % 10); b[n++] = (char)('0' + v2 % 10); b[n++] = ' ';
+                b[n++] = (char)('0' + profItems / 10 % 10); b[n++] = (char)('0' + profItems % 10);
+                {
+                    u16 v3 = (u16)((pBusyT / 8) * 13 / 100), v4 = (u16)((pWaitT / 8) * 13 / 100);
+                    b[n++] = ' '; b[n++] = (char)('0' + v3 / 100 % 10); b[n++] = (char)('0' + v3 / 10 % 10); b[n++] = (char)('0' + v3 % 10);
+                    b[n++] = ' '; b[n++] = (char)('0' + v4 / 100 % 10); b[n++] = (char)('0' + v4 / 10 % 10); b[n++] = (char)('0' + v4 % 10);
+                    pBusyT = pWaitT = 0;
+                }
+                pScanT = pSortT = 0;
+            }
+            b[n] = 0; VDP_drawTextBG(WINDOW, b, 8, 1);
+        }
+#endif
 
         if (result != BONUS_CONTINUE) {
             /* White out the entire frame, including sky and HUD. Timing is
@@ -334,14 +637,22 @@ int bonus_play(u8 index, const u8 *music)
             }
         }
 #ifndef BONUS_NODMA
-        DMA_queueDma(DMA_VRAM, floorBuf, T_FLOOR * 32, FLOOR_TILES * 16, 2);
+        floor_upload();
+#endif
+#ifdef BONUS_PROF
+        { u32 t = getSubTick(); pBusyT += t - pBusy0; pBusy0 = t; }
 #endif
         SYS_doVBlankProcess();
+#ifdef BONUS_PROF
+        { u32 t = getSubTick(); pWaitT += t - pBusy0; pBusy0 = t; }
+#endif
     }
 
     DMA_setMaxTransferSizeToDefault();
     XGM_stopPlay();
     VDP_clearSprites(); VDP_updateSprites(1, DMA);
+    VDP_setScrollingMode(HSCROLL_PLANE, VSCROLL_PLANE);
     VDP_setHorizontalScroll(BG_B, 0);
+    VDP_setVerticalScroll(BG_A, 0);
     return result;
 }

@@ -4,6 +4,7 @@
 #define _RES_JJ1_BONUS_H_
 
 extern const u8 jj1_bonus_tiles[61440];
+extern const u8 jj1_bonus_tiles_hi[61440];
 extern const u8 jj1_bonus_masks[3840];
 extern const u8 jj1_bonus_bg[6144];
 extern const u8 jj1_bonus_grid0[65536];

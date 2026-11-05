@@ -25,12 +25,14 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from import_jj1_shareware import decode_blocks  # noqa: E402
+from import_jj1_shareware import TRANSPARENT  # noqa: E402
 from build_sgdk_jj1_visuals import (  # noqa: E402
-    choose_palette,
     encode_tile,
     quantize_pixels,
     rgb333,
 )
+from collections import Counter
+import jj1_cycle  # noqa: E402
 
 BLOCKS_PER_WORLD = 240
 BLOCK_PX = 32
@@ -79,15 +81,63 @@ def main() -> int:
     tiles, source_palette, _sky = decode_blocks(blocks_file)
     defined = min(len(tiles), BLOCKS_PER_WORLD)
 
-    # Choose the colour line from the blocks this world actually defines.
-    real_images, _ = block_images(tiles, source_palette, defined)
-    palette = choose_palette(real_images)
+    # Reserve palette slots for the ranges the engine rotates, then spend the
+    # remaining colours on everything else.
+    cycles = jj1_cycle.plan(tiles, defined, source_palette)
+    reserved = sum(c["k"] for c in cycles)
+    static_n = 15 - reserved
+    cyc_idx = {i for c in cycles
+               for i in range(jj1_cycle.RANGES[c["n"]][0],
+                              jj1_cycle.RANGES[c["n"]][0] + jj1_cycle.RANGES[c["n"]][1])}
+    pix = []
+    for block in tiles[:defined]:
+        pix.extend(source_palette[p] for p in block
+                   if p not in cyc_idx and p != TRANSPARENT)
+    src = Image.new("RGB", (max(1, len(pix)), 1))
+    src.putdata(pix or [(0, 0, 0)])
+    q = src.quantize(colors=static_n, method=Image.Quantize.MEDIANCUT)
+    raw = q.getpalette()[:static_n * 3]
+    static = [tuple(raw[i:i + 3]) for i in range(0, static_n * 3, 3)]
+    palette = [(0, 0, 0)] + static          # slot 0 + static colours (1..static_n)
+    slot = 1 + static_n
+    for c in cycles:
+        first, count, _ = jj1_cycle.RANGES[c["n"]]
+        c["slot"] = slot
+        use = Counter()
+        for block in tiles[:defined]:
+            use.update(block)
+        cols = [tuple(int(round(v)) for v in col)
+                for col in jj1_cycle.group_colours(c["n"], c["k"], c["off"], use, source_palette)]
+        c["colors"] = cols
+        palette.extend(cols)
+        slot += c["k"]
+    assert len(palette) == 16, len(palette)
 
-    # Then encode the full bank, empty tail included, so the stride is fixed.
-    images, masks = block_images(tiles, source_palette)
     words = []
-    for image, mask in zip(images, masks):
-        words.extend(encode_tile(quantize_pixels(image, palette, mask)))
+    lookup = {}
+    sp = [tuple(c) for c in source_palette]
+    for blk in range(BLOCKS_PER_WORLD):
+        raw = tiles[blk] if blk < len(tiles) else bytes(BLOCK_PX * BLOCK_PX)
+        for ty in range(4):
+            for tx in range(4):
+                idxs = []
+                for y in range(8):
+                    for x in range(8):
+                        p = raw[(ty * 8 + y) * BLOCK_PX + tx * 8 + x]
+                        key = p
+                        if key not in lookup:
+                            hit = 0 if p == TRANSPARENT else None   # sky shows through
+                            for c in (cycles if hit is None else []):
+                                g = jj1_cycle.group_of(p, c)
+                                if g is not None:
+                                    hit = c["slot"] + g
+                            if hit is None:
+                                col = sp[p]
+                                hit = 1 + min(range(static_n),
+                                              key=lambda n: sum((col[k] - static[n][k]) ** 2 for k in range(3)))
+                            lookup[key] = hit
+                        idxs.append(lookup[key])
+                words.extend(encode_tile(idxs))
 
     expected = BLOCKS_PER_WORLD * TILES_PER_BLOCK * 8
     if len(words) != expected:
@@ -110,6 +160,17 @@ def main() -> int:
     for colour in palette[1:16]:
         out.append(f"    0x{rgb333(colour):04X},")
     out.append("};")
+    out += ["", f"#define JJ1_WORLD{args.world}_CYCLES {len(cycles)}",
+            f"const Jj1Cycle {name}_cycles[{max(1, len(cycles))}] = {{"]
+    for c in cycles:
+        first, count, speed = jj1_cycle.RANGES[c["n"]]
+        cols = ", ".join(f"0x{rgb333(col):04X}" for col in c["colors"])
+        cols += ", 0" * (4 - c["k"])
+        out.append(f"    {{ {c['slot']}, {c['k']}, {1 << c['n']}, "
+                   f"{jj1_cycle.step_frames(c)}, {1 if speed > 0 else -1}, {{ {cols} }} }},")
+    if not cycles:
+        out.append("    { 0, 0, 0, 1, 1, { 0, 0, 0, 0 } },")
+    out += ["};"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(out) + "\n")

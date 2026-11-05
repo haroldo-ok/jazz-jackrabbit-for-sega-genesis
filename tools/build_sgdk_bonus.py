@@ -4,6 +4,7 @@
 Reads BONUSMAP.00n, BONUSY.000 (floor tiles/background) and BONUS.000 (item
 sprites) from an installed game and writes:
   res/bonus/tiles.bin      60 floor tiles, 32x32 bytes of palette index 1..15
+  res/bonus/tiles_hi.bin   the same, each byte shifted left by 4
   res/bonus/masks.bin      60 x 64 collision cells (4x4 px each)
   res/bonus/grid<n>.bin    256x256 tile map per level
   res/bonus/events<n>.bin  256x256 event map per level
@@ -70,6 +71,9 @@ def main():
         return cache[orig]
 
     (outres / "tiles.bin").write_bytes(bytes(idx(v) for v in tiles))
+    # The same texels shifted into the high nibble: the floor renderer reads
+    # the left sample of each pair from here (src/floor_asm.s).
+    (outres / "tiles_hi.bin").write_bytes(bytes(idx(v) << 4 for v in tiles))
     (outres / "masks.bin").write_bytes(bytes(masks))
     for n, L in enumerate(levels):
         (outres / f"grid{n}.bin").write_bytes(bytes(min(59, t) for t in L["tiles"]))

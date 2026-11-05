@@ -222,6 +222,7 @@ typedef struct {
     u8 bonusGem;       /* bonus diamond collected this level */
     u8 bonusPending;   /* set for one step when a level ends holding the diamond */
     u16 events;
+    u8 sfxEvent;        /* SOUNDS.000 index of the event sound to play this frame, 0 = none */
 } JazzGame;
 
 void jazz_game_init(JazzGame *game);
