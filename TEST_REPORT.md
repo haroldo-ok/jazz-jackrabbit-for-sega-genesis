@@ -312,3 +312,11 @@ Bonus-level floor check: with the game stepped a fixed amount and the same held 
 - Menu, bonus-player and scene emulator tests: PASS.
 - `run_presentation_emulator_test.sh` now gets past the episode-ending checks but fails "loss white-out missing": it expects the bonus floor at frame 180 and full white at frame 234. The previous build fails the same assertion (its bonus also starts earlier than the test assumes); in the new build the white-out is complete at frame 200. The test's fixed frame numbers are out of date. `run_shot_emulator_test.sh` prints nothing on either build.
 - Not tested on real hardware.
+
+## Music re-conversion (four PCM voices)
+
+- Host tests, `run_headless_emulator_test.sh` (all 11 steps, including title, in-game and bonus music energy) and `run_scene_emulator_test.sh`: PASS.
+- Tubelectric (stage 3) and Medivo (stage 5) play in-game (RMS about 2,400-2,965).
+- xgmtool reads every generated `.xgm` back with the expected sample count and length (for example, the menu has 23 renderings over 6,614 frames).
+- Menu theme, captured from the emulator and compared with the previous ROM: overall level about the same (RMS 2,557 against 2,701), no clipping, more energy at 2-6 kHz (real hi-hats). Drum notes from the module with an audible onset in the first 14 s went from 31/83 to 47/83, and the onsets line up with the module's note times.
+- Not checked by ear, and not on real hardware.

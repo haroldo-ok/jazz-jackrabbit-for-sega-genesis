@@ -214,9 +214,19 @@ Every change keeps the output identical; each is checked as noted.
 
 Measured under Genesis Plus GX: bonus levels went from 6 vblanks per frame (10 fps) to 2 (30 fps). On the main levels, with identical autopilot input, missed frames over the same run dropped from roughly 900 to 169 on stage 0 and from about 600 to 149 on stage 3; stages 5 and 6 now miss none. Some heavy frames on stages 0 and 3 still miss a vblank.
 
+### Music: four PCM voices
+
+`tools/build_music.py --input <dir with the .PSM files>` re-converts the six tracks (menu, bonus, end of level, Diamondus, Tubelectric, Medivo) to `res/music/*.xgm`, which `res/jj1_music.res` now uses (`tools/build_episode.py` picks `.xgm` over `.vgm` when present).
+
+- Every original module has four channels. Each module channel's percussion and one-shot hits (kicks, snares, toms, hats, shakers, cymbals, rides, orchestra and distortion hits) now play on their own XGM PCM channel, from the module's own samples, rendered band-limited at 14 kHz per pitch and volume. Hits that overlap in the original no longer cut each other off as they did on the single DAC stream, and hats, shakers and cymbals are real samples instead of PSG noise.
+- The melodic parts keep the existing FM/PSG arrangement (`res/music/*.vgm`, with its PCM stream removed and PSG noise silenced).
+- Playing all four channels entirely as PCM was measured at 2.3-3.3 MB of pre-rendered samples. XGM has no PCM pitch or volume control, and the ROM has no room for that much, so the melodic parts stay on FM.
+- The XGM files are written directly, because xgmtool keeps only one PCM start per frame when reading a VGM.
+- Sound effects now play at priority 8 and above (`jj1_sfx_start`), so they always take their channel over a drum voice, and the drum voice comes back with its next hit. Channel 1, which effects never use, carries each song's busiest drum channel.
+
 Test-only build flags: `-DJAZZ_AUTOPILOT` (input from the play iteration, so builds of different speed play the same game), `-DJAZZ_FIXED_PACE=n` (each loop iteration takes n frames), `-DJAZZ_MAPCHECK`, `-DBONUS_SELFTEST`.
 
-New files: `src/floor_asm.s`, `tools/jj1_cycle.py`, `tools/build_sgdk_panel.py`, `res/jj1_hud.*`, `res/bonus/tiles_hi.bin`. The ROM is about 3.9 MB (header end 0x3FFFFF).
+New files: `src/floor_asm.s`, `tools/jj1_cycle.py`, `tools/build_sgdk_panel.py`, `res/jj1_hud.*`, `res/bonus/tiles_hi.bin`. The ROM is 4 MB (4,135,520 bytes used; header end 0x3FFFFF).
 
 The remaining original fonts (FONTBIG, FONTINY, FONTMN1, FONTMN2) are still not converted.
 
