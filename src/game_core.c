@@ -104,6 +104,26 @@ static u8 fast_point_solid(const JazzGame *g, s16 x, s16 y, u8 allowOneWay)
     return !jazz_cell_destroyed(g, (u8)gx, (u8)gy);
 }
 
+/* Are all eight mask cells of the 32 px block under (x, y) open in x's
+ * cell column, for a downward probe?  Only says yes when that is certain:
+ * no bridge on the grid row, and an empty block or an empty mask column. */
+static u8 fast_block_column_clear(const JazzGame *g, s16 x, s16 y)
+{
+    const Jj1Fast *f = fast_tables(g->stage);
+    u16 at;
+    u8 block, bit, r;
+    if ((x < 0) || (x >= WORLD_W) || (y < 0) || (y >= WORLD_H)) return 0;
+    if (f->hasBridge && (f->bridgeRows[(u16)y >> 8] & (1 << (((u16)y >> 5) & 7)))) return 0;
+    at = (u16)((((u16)y >> 5) << 8) + ((u16)x >> 5));
+    if ((f->events[at] < 128) && (f->klass[f->events[at]] == JJ1_CLASS_BRIDGE)) return 0;
+    block = f->blocks[at];
+    if (block >= 240) return 1;
+    bit = (u8)(1 << (((u16)x >> 2) & 7));
+    for (r = 0; r < 8; r++)
+        if (f->masks[((u16)block << 3) + r] & bit) return 0;
+    return 1;
+}
+
 static u8 pt_solid(const JazzGame *g, s16 x, s16 y)
 {
     return fast_point_solid(g, x, y, 0);
@@ -408,10 +428,14 @@ static u8 player_vertical_blocked(const JazzGame *g, s16 x, s16 y, s8 step)
  * A larger forward distance means a descending slope, never a step-up. */
 static s8 jj1_ground_distance(const JazzGame *g, s16 x, s16 y)
 {
-    s8 distance;
-    for (distance = 0; distance <= 8; distance++) {
-        if (down_pt_solid(g, x + (PLAYER_W >> 1), y + PLAYER_H + distance))
+    /* One probe per 4 px mask cell: a clear cell is clear for every pixel
+       row inside it, so the distance jumps to the next cell boundary. */
+    const s16 py = y + PLAYER_H;
+    s8 distance = 0;
+    while (distance <= 8) {
+        if (down_pt_solid(g, x + (PLAYER_W >> 1), py + distance))
             return distance;
+        distance = (s8)(distance + 4 - ((py + distance) & 3));
     }
     return 9;
 }
@@ -420,7 +444,21 @@ static s8 jj1_ground_distance(const JazzGame *g, s16 x, s16 y)
 static void move_player_x(JazzGame *g, s8 amount)
 {
     s8 step = (amount < 0) ? -1 : 1;
+#ifdef JAZZ_JJ1_RUNTIME
+    /* The side probes only depend on the 4 px mask cell of the leading edge
+       (and on y): once a cell column is known clear, the next pixels inside
+       it need no new probes. */
+    s16 clearCell = 0x7FFF, clearY = 0;
+#endif
     while (amount) {
+#ifdef JAZZ_JJ1_RUNTIME
+        s16 edgeCell = (s16)((g->player.x + step + ((step > 0) ? (PLAYER_W - 1) : 0)) >> 2);
+        if ((edgeCell == clearCell) && (g->player.y == clearY)) {
+            g->player.x += step;
+            amount -= step;
+            continue;
+        }
+#endif
         if (player_side_blocked(g, g->player.x + step, g->player.y, step)) {
 #ifdef JAZZ_JJ1_RUNTIME
             if (g->player.onGround) {
@@ -457,6 +495,9 @@ static void move_player_x(JazzGame *g, s8 amount)
             g->player.vx = 0;
             return;
         }
+#ifdef JAZZ_JJ1_RUNTIME
+        clearCell = edgeCell; clearY = g->player.y;
+#endif
         g->player.x += step;
         amount -= step;
     }
@@ -465,14 +506,28 @@ static void move_player_x(JazzGame *g, s8 amount)
 static void move_player_y(JazzGame *g, s8 amount)
 {
     s8 step = (amount < 0) ? -1 : 1;
+#ifdef JAZZ_JJ1_RUNTIME
+    s16 clearCell = 0x7FFF;     /* as in move_player_x: x does not change here */
+#endif
     g->player.onGround = 0;
     while (amount) {
+#ifdef JAZZ_JJ1_RUNTIME
+        s16 edgeCell = (s16)((g->player.y + step + ((step > 0) ? (PLAYER_H - 1) : 0)) >> 2);
+        if (edgeCell == clearCell) {
+            g->player.y += step;
+            amount -= step;
+            continue;
+        }
+#endif
         if (player_vertical_blocked(g, g->player.x, g->player.y + step, step)) {
             if (step > 0) g->player.onGround = 1;
             else g->player.jumpTargetY = JAZZ_NO_JUMP_TARGET; /* bonked a ceiling */
             g->player.vy = 0;
             return;
         }
+#ifdef JAZZ_JJ1_RUNTIME
+        clearCell = edgeCell;
+#endif
         g->player.y += step;
         amount -= step;
     }
@@ -843,8 +898,18 @@ static void spawn_grid_enemy(JazzGame *g, u8 gx, u8 gy, u8 klass, u8 strength)
     e->phase = (u8)((gx * 7) & 63);
     if (klass == JJ1_CLASS_ENEMY_WALK) {
         /* settle onto the mask below the event cell */
-        while ((e->y < (WORLD_H - ENEMY_H - 1)) &&
-               !down_pt_solid(g, e->x + (ENEMY_W >> 1), e->y + ENEMY_H)) e->y++;
+        /* (pixel by pixel in effect, but probing once per 4 px mask cell
+           and skipping a 32 px block at once when its whole column is open) */
+        const s16 limit = WORLD_H - ENEMY_H - 1;
+        const s16 px = e->x + (ENEMY_W >> 1);
+        while (e->y < limit) {
+            const s16 py = e->y + ENEMY_H;
+            s16 next;
+            if (!(py & 31) && fast_block_column_clear(g, px, py)) next = e->y + 32;
+            else if (down_pt_solid(g, px, py)) break;
+            else next = e->y + 4 - (py & 3);
+            e->y = (next < limit) ? next : limit;
+        }
         e->homeY = e->y;
     }
 }
@@ -991,12 +1056,14 @@ static void collect_grid_items(JazzGame *g)
     s16 gy0 = g->player.y >> 5;
     s16 gy1 = (g->player.y + PLAYER_H - 1) >> 5;
     s16 gx, gy;
+    const u8 *grid = jj1_runtime_events(g->stage);
+    const u8 *klass = jj1_runtime_klass_table(g->stage);
     for (gy = gy0; gy <= gy1; gy++) {
         for (gx = gx0; gx <= gx1; gx++) {
             const Jj1EventInfo *info;
             u8 k;
             if ((gx < 0) || (gx > 255) || (gy < 0) || (gy > 63)) continue;
-            k = GRID_KLASS(jj1_runtime_events(g->stage), jj1_runtime_klass_table(g->stage), gx, gy);
+            k = GRID_KLASS(grid, klass, gx, gy);
             if ((k != JJ1_CLASS_UNBOARD) && (k != JJ1_CLASS_ITEM)) continue;
             info = jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy));
             if (info->klass == JJ1_CLASS_UNBOARD) {

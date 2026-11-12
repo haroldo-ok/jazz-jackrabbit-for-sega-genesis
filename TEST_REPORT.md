@@ -320,3 +320,11 @@ Bonus-level floor check: with the game stepped a fixed amount and the same held 
 - xgmtool reads every generated `.xgm` back with the expected sample count and length (for example, the menu has 23 renderings over 6,614 frames).
 - Menu theme, captured from the emulator and compared with the previous ROM: overall level about the same (RMS 2,557 against 2,701), no clipping, more energy at 2-6 kHz (real hi-hats). Drum notes from the module with an audible onset in the first 14 s went from 31/83 to 47/83, and the onsets line up with the module's note times.
 - Not checked by ear, and not on real hardware.
+
+## Second optimisation pass
+
+- Host tests PASS; host trace (7 stages x 6000 frames) identical to the previous commit.
+- `run_headless_emulator_test.sh`: all steps PASS. `JAZZ_MAPCHECK` run by hand on all seven stages: PASS.
+- 63 fixed-pace autopilot screenshots (9 per stage) pixel-identical to the previous build plus the vblank-scroll change.
+- Missed frames over 1440 autopilot iterations, stages 0-6: before 87/47/26/52/39/2/0, after 11/3/0/5/4/0/0.
+- On 8 frames of the stage 0 run (respawn pans) the vblank DMA queue exceeds about 7.2 KB, so on real hardware those transfers would run into the visible frame. Not tested on real hardware.

@@ -214,6 +214,18 @@ Every change keeps the output identical; each is checked as noted.
 
 Measured under Genesis Plus GX: bonus levels went from 6 vblanks per frame (10 fps) to 2 (30 fps). On the main levels, with identical autopilot input, missed frames over the same run dropped from roughly 900 to 169 on stage 0 and from about 600 to 149 on stage 3; stages 5 and 6 now miss none. Some heavy frames on stages 0 and 3 still miss a vblank.
 
+### Second optimisation pass (main levels)
+
+Measured with identical autopilot input (`-DJAZZ_PROFILE -DJAZZ_AUTOPILOT -DJAZZ_PROFDUMP=1500`, which writes per-section times, the frame histogram and the vblank DMA load to SRAM): average work per frame fell from about 10.2 ms to 7.2 ms on stage 0, and missed frames over 1440 play iterations went from 87/47/26/52/39/2/0 (stages 0-6) to 11/3/0/5/4/0/0. What is left is mostly the few frames after a death, when the camera pans to the restart point.
+
+- **Map streaming by DMA**: plane A is built in a RAM copy (`planeShadow`) and sent during vblank: one DMA for a new block row, four for a new block column, one for the whole plane on a fast pan. A fast pan only rebuilds the rows and columns that came into view. The block-cache eviction search continues from where it last stopped.
+- **Scroll and palette cycling at vblank**: the scroll values and the cycling colours are now applied in vblank with the map and sprite table, instead of mid-frame (which tore the picture for one frame and writes CRAM during active display).
+- **Player movement**: the side and floor/ceiling probes only depend on the 4 px mask cell of the leading edge, so they run once per cell crossed instead of once per pixel; `jj1_ground_distance` and the enemy drop-to-ground loop step per cell (and per whole empty block).
+- **Bridges**: each level's bridges are listed per grid row when the level is cached; a probe checks that row's spans instead of scanning nine cells.
+- **Event sprites** (`render_jj1_events`): one decision per event id per frame (slot, offsets, attributes), direct table and bit-array reads, and sprites written straight to SGDK's sprite table copy.
+
+Checked: the host trace is still identical; `JAZZ_MAPCHECK` passes on all seven stages; 63 screenshots (9 per stage, fixed-pace autopilot builds) are pixel-identical to the previous build with only the vblank scroll change applied.
+
 ### Music: four PCM voices
 
 `tools/build_music.py --input <dir with the .PSM files>` re-converts the six tracks (menu, bonus, end of level, Diamondus, Tubelectric, Medivo) to `res/music/*.xgm`, which `res/jj1_music.res` now uses (`tools/build_episode.py` picks `.xgm` over `.vgm` when present).
@@ -224,7 +236,7 @@ Measured under Genesis Plus GX: bonus levels went from 6 vblanks per frame (10 f
 - The XGM files are written directly, because xgmtool keeps only one PCM start per frame when reading a VGM.
 - Sound effects now play at priority 8 and above (`jj1_sfx_start`), so they always take their channel over a drum voice, and the drum voice comes back with its next hit. Channel 1, which effects never use, carries each song's busiest drum channel.
 
-Test-only build flags: `-DJAZZ_AUTOPILOT` (input from the play iteration, so builds of different speed play the same game), `-DJAZZ_FIXED_PACE=n` (each loop iteration takes n frames), `-DJAZZ_MAPCHECK`, `-DBONUS_SELFTEST`.
+Test-only build flags: `-DJAZZ_PROFDUMP=n` (with `JAZZ_PROFILE` and `JAZZ_AUTOPILOT`: profile to SRAM at iteration n), `-DJAZZ_AUTOPILOT` (input from the play iteration, so builds of different speed play the same game), `-DJAZZ_FIXED_PACE=n` (each loop iteration takes n frames), `-DJAZZ_MAPCHECK`, `-DBONUS_SELFTEST`.
 
 New files: `src/floor_asm.s`, `tools/jj1_cycle.py`, `tools/build_sgdk_panel.py`, `res/jj1_hud.*`, `res/bonus/tiles_hi.bin`. The ROM is 4 MB (4,135,520 bytes used; header end 0x3FFFFF).
 

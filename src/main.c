@@ -54,7 +54,13 @@ static const u8 stageBonus[JAZZ_STAGE_COUNT] = {
 
 #ifdef JAZZ_PROFILE
 static u32 profT[8];
+#ifdef JAZZ_PROFDUMP
+static u32 profSum[8], profBusy, profIter, profCur[8], profOver[8], profOverN;
+static u16 profBusyMax, profHist[6], profDmaMax, profDmaOver;
+#define PROF(n, stmt) do { u32 t0 = getSubTick(), t1; stmt; t1 = getSubTick() - t0; profT[n] += t1; profSum[n] += t1; profCur[n] += t1; } while (0)
+#else
 #define PROF(n, stmt) do { u32 t0 = getSubTick(); stmt; profT[n] += getSubTick() - t0; } while (0)
+#endif
 #else
 #define PROF(n, stmt) stmt
 #endif
@@ -249,37 +255,37 @@ static void reset_jj1_cache(void)
  * out once per window move instead of an 88-cell scan per cache candidate. */
 static void mark_visible_window(void)
 {
-    u16 bx, by;
+    const u8 *cell = jj1ActiveBlocks + ((u16)jj1MapOriginY << 8) + jj1MapOriginX;
+    u8 *const visible = jj1Visible;
+    u8 stamp, by, bx;
     if (++jj1VisStamp == 0) {
-        for (bx = 0; bx < 256; bx++) jj1Visible[bx] = 0;
+        memset(jj1Visible, 0, sizeof(jj1Visible));
         jj1VisStamp = 1;
     }
-    for (by = 0; by < 8; by++) {
-        const u8 *row = jj1ActiveBlocks + ((jj1MapOriginY + by) * 256) + jj1MapOriginX;
-        for (bx = 0; bx < 11; bx++) jj1Visible[row[bx]] = jj1VisStamp;
-    }
+    stamp = jj1VisStamp;
+    for (by = 8; by; by--, cell += 256 - 11)
+        for (bx = 11; bx; bx--) visible[*cell++] = stamp;
     jj1VisValid = 1;
 }
 
-static u8 jj1_source_visible(u8 sourceBlock)
+static NO_INLINE u16 cache_jj1_block(u8 sourceBlock)
 {
-    if (!jj1VisValid) mark_visible_window();
-    return jj1Visible[sourceBlock] == jj1VisStamp;
-}
-
-static u16 cache_jj1_block(u8 sourceBlock)
-{
-    u16 slot;
+    u16 slot, n;
     if (jj1BlockSlot[sourceBlock] != 0xFF) return jj1BlockSlot[sourceBlock];
 
     /* Replace only a block which left the 11x8 visible window. This avoids
-       rewriting visible VRAM tiles while the plane scrolls. */
-    for (slot = 0; slot < JJ1_BLOCK_CACHE_BLOCKS; slot++)
-        if ((jj1BlockCache[slot] == 0xFF) || !jj1_source_visible(jj1BlockCache[slot])) break;
-    if (slot == JJ1_BLOCK_CACHE_BLOCKS) {
-        slot = jj1CacheReplace++;
-        if (jj1CacheReplace == JJ1_BLOCK_CACHE_BLOCKS) jj1CacheReplace = 0;
+       rewriting visible VRAM tiles while the plane scrolls.  The search goes
+       round from where the last one ended, so it normally stops within a
+       slot or two instead of walking over the slots still on screen. */
+    if (!jj1VisValid) mark_visible_window();
+    slot = jj1CacheReplace;
+    for (n = JJ1_BLOCK_CACHE_BLOCKS; n; n--) {
+        u8 held = jj1BlockCache[slot];
+        if ((held == 0xFF) || (jj1Visible[held] != jj1VisStamp)) break;
+        if (++slot == JJ1_BLOCK_CACHE_BLOCKS) slot = 0;
     }
+    /* every slot on screen (more than 64 distinct blocks): take the next */
+    jj1CacheReplace = (u8)((slot + 1 == JJ1_BLOCK_CACHE_BLOCKS) ? 0 : slot + 1);
     if (jj1BlockCache[slot] != 0xFF) jj1BlockSlot[jj1BlockCache[slot]] = 0xFF;
     jj1BlockCache[slot] = sourceBlock;
     jj1BlockSlot[sourceBlock] = (u8)slot;
@@ -288,41 +294,134 @@ static u16 cache_jj1_block(u8 sourceBlock)
     return slot;
 }
 
+/* Plane A is built in a RAM copy with the plane's own 64x32 layout and sent
+ * by DMA during vblank.  Writing map cells through the data port during the
+ * active display (as VDP_setTileMapXY does) runs at the VDP's FIFO speed of
+ * a few words per scanline; a scrolled-in column or row cost 3-8 ms. */
+#define PLANE_COLS 64
+#define PLANE_ROWS 32
+static u16 planeShadow[PLANE_ROWS][PLANE_COLS];
+static u16 planeColumn[3][4][PLANE_ROWS];   /* tile columns of new block columns */
+
+/* Map word of the first cell of the block at a grid position (a block that
+ * has been shot away shows block 0, the backdrop, as the engine's setTile
+ * does).  The cache lookup is inline; only a miss calls out. */
+#define JJ1_BLOCK_WORD(out, block, bit) do {                                     \
+        u8 blk_ = (block);                                                       \
+        u8 slot_;                                                                \
+        if ((game.destroyed[(bit) >> 3] >> ((bit) & 7)) & 1) blk_ = 0;           \
+        slot_ = jj1BlockSlot[blk_];                                              \
+        if (slot_ == 0xFF) { PROFMISS(slot_ = (u8)cache_jj1_block(blk_)); }      \
+        PROFCOUNT_BLOCK();                                                       \
+        (out) = (u16)(TILE_ATTR_FULL(PAL2, FALSE, FALSE, FALSE, T_JJ1_BLOCK_CACHE) + \
+                      ((u16)slot_ * JJ1_BLOCK_TILE_COUNT));                      \
+    } while (0)
+#ifdef JAZZ_PROFDUMP
+#define PROFMISS(stmt) do { u32 t0_ = getSubTick(); stmt; profCur[7] += getSubTick() - t0_; } while (0)
+#define PROFCOUNT_BLOCK() (profCur[6] += 10)
+#else
+#define PROFMISS(stmt) stmt
+#define PROFCOUNT_BLOCK() ((void)0)
+#endif
+
+/* The sixteen map words of a block (w, w+1, ... w+15 in four rows of the
+ * RAM copy) as eight long stores: the cells are word-aligned pairs, and the
+ * 68000 writes a long in two thirds of the time of two words. */
+typedef u32 __attribute__((may_alias)) CellPair;
+#define PUT_BLOCK_CELLS(row, w) do {                                             \
+        CellPair *p_ = (CellPair *)(row);                                        \
+        u32 a_ = ((u32)(w) << 16) | (u16)((w) + 1);                              \
+        const u32 two_ = 0x00020002UL;                                           \
+        u32 b_ = a_ + two_;                                                      \
+        p_[0] = a_; p_[1] = b_; a_ = b_ + two_; b_ = a_ + two_;                  \
+        p_[PLANE_COLS / 2] = a_; p_[PLANE_COLS / 2 + 1] = b_; a_ = b_ + two_; b_ = a_ + two_; \
+        p_[PLANE_COLS] = a_; p_[PLANE_COLS + 1] = b_; a_ = b_ + two_; b_ = a_ + two_; \
+        p_[PLANE_COLS * 3 / 2] = a_; p_[PLANE_COLS * 3 / 2 + 1] = b_;            \
+    } while (0)
+
+/* The 4x4 map cells of one 32 px block, into the RAM copy. */
 static void draw_jj1_block(s16 sourceX, s16 sourceY)
 {
-    u16 tx, ty;
-    u8 sourceBlock;
-    u16 baseTile;
+    u16 w, *row, bit;
+    u8 ty;
     if ((sourceX < 0) || (sourceX >= 256) || (sourceY < 0) || (sourceY >= 64)) return;
-    sourceBlock = jj1ActiveBlocks[(sourceY * 256) + sourceX];
-    /* A destructible that has been shot away shows the backdrop through it,
-       matching the engine swapping the block out (setTile). */
-    if (jazz_cell_destroyed(&game, (u8)sourceX, (u8)sourceY)) sourceBlock = 0;
-    baseTile = T_JJ1_BLOCK_CACHE + (cache_jj1_block(sourceBlock) * JJ1_BLOCK_TILE_COUNT);
-    {
-        /* One VRAM address per row of four map cells (auto-increment 2)
-           instead of a full VDP_setTileMapXY call per cell; the increment
-           must be set, since SGDK leaves whatever the last DMA used. */
-        vu32 *ctrl = (vu32 *)VDP_CTRL_PORT;
-        vu16 *data = (vu16 *)VDP_DATA_PORT;
-        u16 w = TILE_ATTR_FULL(PAL2, FALSE, FALSE, FALSE, baseTile);
-        u16 addr = VDP_getPlaneAddress(BG_A, (u16)((sourceX & 15) * 4), (u16)((sourceY & 7) * 4));
-        (void)tx;
-        /* queued DMAs (scroll tables, step 4/32) leave other increments set */
-        VDP_setAutoInc(2);
-        for (ty = 0; ty < 4; ty++) {
-            *ctrl = VDP_WRITE_VRAM_ADDR((u32)addr);
-            *data = w; *data = (u16)(w + 1); *data = (u16)(w + 2); *data = (u16)(w + 3);
-            w = (u16)(w + 4);
-            addr = (u16)(addr + 64 * 2);     /* next row of the 64-cell plane */
+    bit = (u16)((sourceY << 8) + sourceX);
+    JJ1_BLOCK_WORD(w, jj1ActiveBlocks[bit], bit);
+    row = &planeShadow[(sourceY & 7) * 4][(sourceX & 15) * 4];
+    (void)ty;
+    PUT_BLOCK_CELLS(row, w);
+}
+
+/* Send one block's cells (a block that was just shot away). */
+static void send_jj1_block(s16 sourceX, s16 sourceY)
+{
+    u8 ty;
+    u16 py = (u16)((sourceY & 7) * 4), px = (u16)((sourceX & 15) * 4);
+    for (ty = 0; ty < 4; ty++)
+        DMA_queueDma(DMA_VRAM, &planeShadow[py + ty][px],
+                     VDP_getPlaneAddress(BG_A, px, (u16)(py + ty)), 4, 2);
+}
+
+/* A new block column (8 blocks: exactly the plane's 32 rows).  The cells go
+ * into the RAM copy and into four linear tile-column buffers, which are
+ * queued as four DMAs stepping one plane row per word. */
+static void build_jj1_column(s16 sourceX, s16 originY, u8 buffer)
+{
+    const u16 px = (u16)((sourceX & 15) * 4);
+    u16 bit = (u16)((originY << 8) + sourceX);
+    u16 (*col)[PLANE_ROWS] = planeColumn[buffer];
+    u8 by, tx;
+    for (by = 8; by; by--, bit = (u16)(bit + 256)) {
+        const u16 pr = (u16)(((bit >> 8) & 7) * 4);
+        u16 *row = &planeShadow[pr][px];
+        u16 w;
+        u8 ty;
+        JJ1_BLOCK_WORD(w, jj1ActiveBlocks[bit], bit);
+        PUT_BLOCK_CELLS(row, w);
+        (void)ty;
+        {   /* the same cells down each of the four tile columns: w, w+4, w+8, w+12 */
+            const u32 four = 0x00040004UL;
+            u32 a = ((u32)w << 16) | (u16)(w + 4), b = a + four + four;
+            CellPair *c = (CellPair *)&col[0][pr];
+            const u32 one = 0x00010001UL;
+            c[0] = a; c[1] = b; a += one; b += one;
+            c[PLANE_ROWS / 2] = a; c[PLANE_ROWS / 2 + 1] = b; a += one; b += one;
+            c[PLANE_ROWS] = a; c[PLANE_ROWS + 1] = b; a += one; b += one;
+            c[PLANE_ROWS * 3 / 2] = a; c[PLANE_ROWS * 3 / 2 + 1] = b;
         }
     }
+    for (tx = 0; tx < 4; tx++)
+        DMA_queueDma(DMA_VRAM, col[tx], VDP_getPlaneAddress(BG_A, (u16)(px + tx), 0),
+                     PLANE_ROWS, PLANE_COLS * 2);
+}
+
+/* A new block row (11 blocks) into the RAM copy. */
+static void build_jj1_row(s16 originX, s16 sourceY)
+{
+    u16 bit = (u16)((sourceY << 8) + originX);
+    u16 (*rows)[PLANE_COLS] = &planeShadow[(sourceY & 7) * 4];
+    u8 bx;
+    for (bx = 11; bx; bx--, bit++) {
+        u16 *cell = &rows[0][(bit & 15) * 4];
+        u16 w;
+        JJ1_BLOCK_WORD(w, jj1ActiveBlocks[bit], bit);
+        PUT_BLOCK_CELLS(cell, w);
+    }
+}
+
+/* Queue a block row: its four tile rows are contiguous in the plane, so one
+ * DMA sends them whole.  The five blocks outside the window are sent as
+ * they already are in VRAM (the RAM copy mirrors the plane). */
+static void send_jj1_row(s16 sourceY)
+{
+    const u16 py = (u16)((sourceY & 7) * 4);
+    DMA_queueDma(DMA_VRAM, planeShadow[py], VDP_getPlaneAddress(BG_A, 0, py), 4 * PLANE_COLS, 2);
 }
 
 static void render_jj1_map(s16 originX, s16 originY)
 {
-    s16 oldX, oldY;
-    u16 bx, by;
+    s16 oldX, oldY, dx, dy, adx, ady, i;
+    u16 by;
     if (originX < 0) originX = 0;
     if (originX > (256 - 11)) originX = 256 - 11;
     if (originY < 0) originY = 0;
@@ -334,24 +433,44 @@ static void render_jj1_map(s16 originX, s16 originY)
     jj1MapOriginX = originX;
     jj1MapOriginY = originY;
     jj1VisValid = 0;            /* recomputed on the first cache miss */
+    dx = originX - oldX; dy = originY - oldY;
+    adx = (dx < 0) ? -dx : dx; ady = (dy < 0) ? -dy : dy;
 
-    if ((oldX < 0) || ((originX - oldX > 1) || (oldX - originX > 1)) ||
-        ((originY - oldY > 1) || (oldY - originY > 1))) {
-        VDP_clearPlane(BG_A, TRUE);
-        for (by = 0; by < 8; by++)
-            for (bx = 0; bx < 11; bx++) draw_jj1_block(originX + bx, originY + by);
+    if ((oldX < 0) || (adx >= 11) || (ady >= 8)) {
+        /* nothing of the old window is left (stage start, a far respawn):
+           rebuild the whole plane */
+        if (oldX < 0) memset(planeShadow, 0, sizeof(planeShadow));
+        for (by = 0; by < 8; by++) build_jj1_row(originX, originY + by);
+        DMA_transfer(blockTm, DMA_VRAM, planeShadow, VDP_getPlaneAddress(BG_A, 0, 0),
+                     PLANE_ROWS * PLANE_COLS, 2);
+        return;
+    }
+    if (adx + ady > 3) {
+        /* a fast pan (the camera catching up after a respawn): build only
+           the rows and columns that came into the window, then send the
+           plane in one piece */
+        s16 bx;
+        for (i = 0; i < ady; i++)
+            build_jj1_row(originX, (dy > 0) ? (originY + 7 - i) : (originY + i));
+        for (i = 0; i < adx; i++) {
+            bx = (dx > 0) ? (originX + 10 - i) : (originX + i);
+            for (by = 0; by < 8; by++) draw_jj1_block(bx, originY + by);
+        }
+        DMA_queueDma(DMA_VRAM, planeShadow, VDP_getPlaneAddress(BG_A, 0, 0),
+                     PLANE_ROWS * PLANE_COLS, 2);
         return;
     }
 
-    /* Ring-map update: only the new 32px block row/column is uploaded. */
-    if (originX > oldX)
-        for (by = 0; by < 8; by++) draw_jj1_block(originX + 10, originY + by);
-    else if (originX < oldX)
-        for (by = 0; by < 8; by++) draw_jj1_block(originX, originY + by);
-    if (originY > oldY)
-        for (bx = 0; bx < 11; bx++) draw_jj1_block(originX + bx, originY + 7);
-    else if (originY < oldY)
-        for (bx = 0; bx < 11; bx++) draw_jj1_block(originX + bx, originY);
+    /* Ring-map update: only the new 32px block rows/columns are built (up to
+       three in a frame while the camera catches up) and queued.  Rows first:
+       a column is copied out for its DMA, so it must be built last to carry
+       the cells of a row that changed in the same frame. */
+    for (i = 0; i < ady; i++)
+        build_jj1_row(originX, (dy > 0) ? (originY + 7 - i) : (originY + i));
+    for (i = 0; i < ady; i++)
+        send_jj1_row((dy > 0) ? (originY + 7 - i) : (originY + i));
+    for (i = 0; i < adx; i++)
+        build_jj1_column((dx > 0) ? (originX + 10 - i) : (originX + i), originY, (u8)i);
 }
 
 static void render_jj1_sky(void)
@@ -398,18 +517,27 @@ static void reset_palette_cycles(void)
     for (u8 i = 0; i < 4; i++) { cyclePhase[i] = 0; cycleTick[i] = 0; }
 }
 
-static void update_palette_cycles(void)
+/* Rotates the rings that are due.  In play the colours are queued for vblank
+ * (a CRAM write during the active display shows as dots on real hardware and
+ * changed the lower part of the picture a frame early); the self-test asks
+ * for immediate writes so it can read them back. */
+static void update_palette_cycles(u8 immediate)
 {
+    static u16 ring[4][4];
     for (u8 i = 0; i < stageArt->cycleCount; i++) {
         const Jj1Cycle *c = &stageArt->cycles[i];
         if (!(stageArt->cycleMask & c->bit)) continue;
         if (++cycleTick[i] < c->stepFrames) continue;
         cycleTick[i] = 0;
-        u8 k = c->count;
-        cyclePhase[i] = (c->dir > 0) ? (u8)((cyclePhase[i] + k - 1) % k)
-                                     : (u8)((cyclePhase[i] + 1) % k);
-        for (u8 s = 0; s < k; s++)
-            PAL_setColor((PAL2 * 16) + c->slot + s, c->colors[(s + cyclePhase[i]) % k]);
+        u8 k = c->count, p;
+        cyclePhase[i] = (c->dir > 0) ? (u8)(cyclePhase[i] ? cyclePhase[i] - 1 : k - 1)
+                                     : (u8)((cyclePhase[i] + 1 == k) ? 0 : cyclePhase[i] + 1);
+        p = cyclePhase[i];
+        for (u8 s = 0; s < k; s++) {
+            ring[i][s] = c->colors[p];
+            if (++p == k) p = 0;
+        }
+        PAL_setColors((PAL2 * 16) + c->slot, ring[i], k, immediate ? CPU : DMA_QUEUE);
     }
 }
 
@@ -582,7 +710,6 @@ static void update_camera_and_map(void)
     cameraY = camera_follow(cameraY, wantedY);
     render_jj1_map(cameraX >> 5, cameraY >> 5);
 #ifdef JAZZ_MAPCHECK
-    map_check();
     {
         char t[12];
         intToStr(mapCheckBadSmall, t, 4); VDP_drawTextBG(WINDOW, t, 34, 1);
@@ -590,16 +717,26 @@ static void update_camera_and_map(void)
         intToStr(mapCheckRuns, t, 5); VDP_drawTextBG(WINDOW, t, 23, 1);
     }
 #endif
-    VDP_setHorizontalScroll(BG_A, -cameraX);
-    VDP_setVerticalScroll(BG_A, cameraY);
+    /* Applied during vblank, with the map DMAs and the sprite table, so the
+       scroll, the new map cells and the sprites change on the same frame. */
+    VDP_setHorizontalScrollVSync(BG_A, -cameraX);
+    VDP_setVerticalScrollVSync(BG_A, cameraY);
     VDP_setHorizontalScroll(BG_B, 0);
 }
 
-static void put_sprite(u16 *count, s16 x, s16 y, u8 size, u16 attr)
+/* One hardware sprite, straight into SGDK's sprite table copy (the same
+ * fields VDP_setSpriteFull sets, without a call per sprite). */
+static inline void put_sprite(u16 *count, s16 x, s16 y, u8 size, u16 attr)
 {
-    if ((*count < 79) && (x > -40) && (x < 336) && (y > -40) && (y < 240)) {
-        VDP_setSpriteFull(*count, x, y, size, attr, (u8)(*count + 1));
-        (*count)++;
+    const u16 n = *count;
+    if ((n < 79) && (x > -40) && (x < 336) && (y > -40) && (y < 240)) {
+        VDPSprite *spr = &vdpSpriteCache[n];
+        spr->y = (s16)(y + 0x80);
+        spr->size = size;
+        spr->link = (u8)(n + 1);
+        spr->attribut = attr;
+        spr->x = (s16)(x + 0x80);
+        *count = (u16)(n + 1);
     }
 }
 
@@ -644,111 +781,118 @@ static void draw_boss_energy(u16 *count, const JazzEnemy *e)
     }
 }
 
+/* What an event id draws with this frame: the item slot it holds, or
+ * EV_NO_SLOT (its art is missing or too big, or both slots were taken).  The
+ * answer cannot change within a frame - slots are only ever claimed - so it
+ * is worked out at the id's first cell and remembered for the rest. */
+#define EV_NO_SLOT 0xFE
+static u8 evMemo[128], evMemoStamp[128], evStamp;
+static struct { s16 ox, oy; u16 attr; u8 size; } evSlotDraw[JJ1_ITEM_SLOTS];
+
+static NO_INLINE u8 event_slot(u8 id, u8 bridge)
+{
+    const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
+    u8 slot = 0xFF, s;
+    evMemoStamp[id] = evStamp;
+    evMemo[id] = EV_NO_SLOT;
+    if (!art || !art->frames || ((u16)(art->tilesW * art->tilesH) > JJ1_ITEM_SLOT_TILES))
+        return EV_NO_SLOT;
+    for (s = 0; s < JJ1_ITEM_SLOTS; s++)
+        if (itemSlotEvent[s] == id) { slot = s; break; }
+    if (slot == 0xFF)
+        for (s = 0; s < JJ1_ITEM_SLOTS; s++)
+            if (itemSlotEvent[s] == 0xFF) {
+                slot = s;
+                itemSlotEvent[s] = id;
+                if (bridge) {
+                    upload_item_slot(s, (u16)(0x8000 | id),
+                        stageArt->spriteTiles + ((u32)art->tile * 8),
+                        (u16)(art->tilesW * art->tilesH));
+                } else {
+                    /* The whole cell is uploaded, so the column-major tile
+                       order stays intact. */
+                    u8 frame = anim_frame(art->frames);
+                    upload_item_slot(s, (u16)((id << 4) | (frame & 15)),
+                        stageArt->spriteTiles +
+                        ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                        (u16)(art->tilesW * art->tilesH));
+                }
+                break;
+            }
+    if (slot == 0xFF) return EV_NO_SLOT;
+    evSlotDraw[slot].ox = (s16)((32 - (s16)(art->tilesW << 3)) >> 1);
+    evSlotDraw[slot].oy = (s16)((32 - (s16)(art->tilesH << 3)) >> 1);
+    evSlotDraw[slot].size = SPRITE_SIZE(art->tilesW, art->tilesH);
+    evSlotDraw[slot].attr = TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
+                                           T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES));
+    evMemo[id] = slot;
+    return slot;
+}
+
 static void render_jj1_events(u16 *count)
 {
-    s16 sx, sy;
-    u8 i;
-    for (i = 0; i < JJ1_ITEM_SLOTS; i++) itemSlotEvent[i] = 0xFF;
     const u8 *grid = jj1_runtime_events(game.stage);
-    for (sy = jj1MapOriginY; sy < jj1MapOriginY + 8; sy++) {
-        const u8 *row;
-        if ((sy < 0) || (sy >= 64)) continue;
-        row = grid + ((u16)sy << 8);
-        for (sx = jj1MapOriginX; sx < jj1MapOriginX + 11; sx++) {
-            u8 id;
-            const Jj1EventInfo *info;
+    const u8 *klassOf = jj1_runtime_klass_table(game.stage);
+    const Jj1EventInfo *infos = jj1_event_info(game.stage, 0);
+    const u8 *cell;
+    s16 py;
+    u16 bit;
+    u8 i, by;
+    for (i = 0; i < JJ1_ITEM_SLOTS; i++) itemSlotEvent[i] = 0xFF;
+    if (++evStamp == 0) {
+        memset(evMemoStamp, 0, sizeof(evMemoStamp));
+        evStamp = 1;
+    }
+    if ((jj1MapOriginX < 0) || (jj1MapOriginY < 0)) return;
+    /* the 11x8 block window of the map (always inside the level) */
+    py = (s16)((jj1MapOriginY << 5) - cameraY);
+    cell = grid + ((u16)jj1MapOriginY << 8) + jj1MapOriginX;
+    for (by = 8; by; by--, py = (s16)(py + 32), cell += 256 - 11) {
+        s16 px = (s16)((jj1MapOriginX << 5) - cameraX - 32);
+        u8 bx;
+        for (bx = 11; bx; bx--) {
+            const u8 id = *cell++;
             u8 klass;
-            if ((sx < 0) || (sx >= 256)) continue;
-            id = row[sx];
-            if (!id) continue;                 /* most cells hold nothing */
-            klass = jj1_runtime_klass(game.stage, id);
-            if ((klass != JJ1_CLASS_SPRING) && (klass != JJ1_CLASS_BRIDGE) &&
-                (klass != JJ1_CLASS_ITEM)) continue;
-            info = jj1_event_info(game.stage, id);
-            if (info->klass == JJ1_CLASS_SPRING) {
+            px = (s16)(px + 32);
+            if (!id) continue;                     /* most cells hold nothing */
+            if (id >= 128) continue;
+            klass = klassOf[id];
+            bit = (u16)(cell - 1 - grid);
+            if (klass == JJ1_CLASS_ITEM) {
+                u8 slot;
+                if ((game.taken[bit >> 3] >> (bit & 7)) & 1) continue;
+                slot = (evMemoStamp[id] == evStamp) ? evMemo[id] : event_slot(id, 0);
+                if (slot != EV_NO_SLOT)
+                    put_sprite(count, (s16)(px + evSlotDraw[slot].ox), (s16)(py + evSlotDraw[slot].oy),
+                               evSlotDraw[slot].size, evSlotDraw[slot].attr);
+                else
+                    /* No sprite, one too large for a slot, or more distinct
+                       item types on screen than slots: the gem dot. */
+                    put_sprite(count, (s16)(px + 12), (s16)(py + 12),
+                        SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
+            } else if (klass == JJ1_CLASS_SPRING) {
                 /* param carries the launch magnitude; bucket it into the
                    three visual strengths. */
-                u16 variant = (info->param >= 12) ? 2 : ((info->param >= 9) ? 1 : 0);
-                put_sprite(count, (sx << 5) - cameraX, (sy << 5) - cameraY + 16,
+                const u8 param = infos[id].param;
+                u16 variant = (param >= 12) ? 2 : ((param >= 9) ? 1 : 0);
+                put_sprite(count, px, (s16)(py + 16),
                     SPRITE_SIZE(4, 2), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
                     T_SPRING + (variant * JJ1_SPRING_TILES_PER_VARIANT)));
-            } else if (info->klass == JJ1_CLASS_BRIDGE) {
+            } else if (klass == JJ1_CLASS_BRIDGE) {
                 /* One bridge event is a whole span: `param` logs spaced
                    `strength` px apart, with the deck `points` px below the cell
-                   top.  Drawing only the event's own cell showed just the first
-                   log.  The span is drawn from its own cell so it is emitted
+                   top.  The span is drawn from its own cell so it is emitted
                    once, not once per column it crosses. */
-                const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
-                if (art && art->frames &&
-                    (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {
-                    u8 slot = 0xFF, k;
-                    for (k = 0; k < JJ1_ITEM_SLOTS; k++)
-                        if (itemSlotEvent[k] == id) { slot = k; break; }
-                    if (slot == 0xFF)
-                        for (k = 0; k < JJ1_ITEM_SLOTS; k++)
-                            if (itemSlotEvent[k] == 0xFF) {
-                                slot = k;
-                                itemSlotEvent[k] = id;
-                                upload_item_slot(k, (u16)(0x8000 | id),
-                                    stageArt->spriteTiles + ((u32)art->tile * 8),
-                                    (u16)(art->tilesW * art->tilesH));
-                                break;
-                            }
-                    if (slot != 0xFF) {
-                        s16 deckY = (s16)((sy << 5) + info->points) - cameraY;
-                        s16 baseX = (s16)(sx << 5) - cameraX;
-                        u8 piece;
-                        for (piece = 0; piece < info->param; piece++) {
-                            s16 lx = (s16)(baseX + (piece * info->strength));
-                            if ((lx < -32) || (lx > 320)) continue;  /* off screen */
-                            put_sprite(count, lx, deckY,
-                                SPRITE_SIZE(art->tilesW, art->tilesH),
-                                TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
-                                    T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES)));
-                        }
+                const Jj1EventInfo *info = &infos[id];
+                u8 slot = (evMemoStamp[id] == evStamp) ? evMemo[id] : event_slot(id, 1);
+                if (slot != EV_NO_SLOT) {
+                    s16 deckY = (s16)(py + info->points);
+                    s16 lx = px;
+                    u8 piece;
+                    for (piece = 0; piece < info->param; piece++, lx = (s16)(lx + info->strength)) {
+                        if ((lx < -32) || (lx > 320)) continue;  /* off screen */
+                        put_sprite(count, lx, deckY, evSlotDraw[slot].size, evSlotDraw[slot].attr);
                     }
-                }
-            } else if ((info->klass == JJ1_CLASS_ITEM) &&
-                       !jazz_event_taken(&game, (u8)sx, (u8)sy)) {
-                const Jj1EventSprite *art = stageArt->sprites ? &stageArt->sprites[id] : 0;
-                if (art && art->frames &&
-                    (u16)(art->tilesW * art->tilesH) <= JJ1_ITEM_SLOT_TILES) {
-                    /* Find (or claim) a slot for this item type.  The whole cell
-                       is uploaded, so the column-major tile order stays intact. */
-                    u16 cellW = (u16)(art->tilesW << 3);
-                    u16 cellH = (u16)(art->tilesH << 3);
-                    u8 slot = 0xFF, s;
-                    u8 frame = anim_frame(art->frames);
-                    for (s = 0; s < JJ1_ITEM_SLOTS; s++)
-                        if (itemSlotEvent[s] == id) { slot = s; break; }
-                    if (slot == 0xFF)
-                        for (s = 0; s < JJ1_ITEM_SLOTS; s++)
-                            if (itemSlotEvent[s] == 0xFF) {
-                                slot = s;
-                                itemSlotEvent[s] = id;
-                                upload_item_slot(s, (u16)((id << 4) | (frame & 15)),
-                                    stageArt->spriteTiles +
-                                    ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
-                                    (u16)(art->tilesW * art->tilesH));
-                                break;
-                            }
-                    if (slot != 0xFF) {
-                        put_sprite(count,
-                            (sx << 5) - cameraX + (s16)((32 - cellW) >> 1),
-                            (sy << 5) - cameraY + (s16)((32 - cellH) >> 1),
-                            SPRITE_SIZE(art->tilesW, art->tilesH),
-                            TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE,
-                                           T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES)));
-                    } else {
-                        /* Pool exhausted (more distinct item types on screen
-                           than slots): fall back to the gem dot. */
-                        put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
-                            SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
-                    }
-                } else {
-                    /* Item with no sprite, or one too large for a slot. */
-                    put_sprite(count, (sx << 5) - cameraX + 12, (sy << 5) - cameraY + 12,
-                        SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, T_GEM));
                 }
             }
         }
@@ -762,7 +906,7 @@ static void render_sprites(void)
 #ifdef JAZZ_PROFILE
     u32 pt0 = getSubTick();
 #endif
-    VDP_resetSprites();
+    VDP_clearSprites();     /* (the sprite allocator SGDK also resets is not used) */
     {
         /* Jazz's animation state comes from the shared physics; each state is
            a cell (up to 2x2 chunks) streamed into one VRAM slot, refilled when
@@ -1040,7 +1184,7 @@ static void render_sprites(void)
 #endif
     if (count) {
         VDP_setSpriteLink(count - 1, 0);
-        PROF(6, VDP_updateSprites(count, DMA_QUEUE));
+        VDP_updateSprites(count, DMA_QUEUE);
     } else VDP_clearSprites();
 }
 
@@ -1351,6 +1495,11 @@ static void run_play_frame(u16 input)
 {
     u8 completingLevel = (game.transitionTimer == 1 && !game.paused);
     lastInput = input;
+#ifdef JAZZ_MAPCHECK
+    /* the plane is sent during vblank: check what the last frame left there,
+       before the game state moves on */
+    if ((renderedStage == game.stage) && (jj1MapOriginX >= 0)) map_check();
+#endif
     PROF(0, jazz_step(&game, input));
     if (completingLevel && !game.transitionTimer && !game.paused) {
         if (renderedStage < JAZZ_STAGE_COUNT && stage_has_clear_scene[renderedStage]) {
@@ -1384,11 +1533,12 @@ static void run_play_frame(u16 input)
         render_level_map();
         renderedStage = game.stage;
     }
-    update_palette_cycles();
+    update_palette_cycles(0);
     PROF(1, update_camera_and_map());
     blockTm = DMA_QUEUE;   /* the first call filled the screen; scrolling is queued */
     if (game.destroyCount != renderedDestroyCount) {
         draw_jj1_block(game.destroyedX, game.destroyedY);
+        send_jj1_block(game.destroyedX, game.destroyedY);
         renderedDestroyCount = game.destroyCount;
     }
     PROF(2, draw_status_line(&game));
@@ -1430,7 +1580,7 @@ static u8 run_target_point_to_point_tests(void)
        advanced, and CRAM must hold the colour its phase calls for. */
     stageArt = &jazz_stage_art[2];
     reset_palette_cycles();
-    { u8 i; for (i = 0; i < 70; i++) update_palette_cycles(); }
+    { u8 i; for (i = 0; i < 70; i++) update_palette_cycles(1); }
     { u8 i, moved = 0;
       for (i = 0; i < stageArt->cycleCount; i++) {
           const Jj1Cycle *c = &stageArt->cycles[i];
@@ -1587,7 +1737,55 @@ int main(bool hardReset)
                     if ((it % 70) < 18) in |= JAZZ_INPUT_JUMP;
                     if ((it % 400) > 380) in |= JAZZ_INPUT_DOWN;
                     it++;
+#ifdef JAZZ_PROFDUMP
+                    {
+                        static u16 lastV2;
+                        u32 b0 = getSubTick(), b1;
+                        u16 dv = (u16)(vtimer - lastV2); lastV2 = vtimer;
+                        run_play_frame(in);
+                        b1 = getSubTick() - b0;
+                        if (it > 60) {
+                            u16 q = DMA_getQueueTransferSize();
+                            if (q > profDmaMax) profDmaMax = q;
+                            if (q > 7200) profDmaOver++;
+                        }
+                        if (it > 60) {      /* skip level set-up */
+                            profBusy += b1; profIter++;
+                            if (b1 > profBusyMax && b1 < 60000) profBusyMax = (u16)b1;
+                            profHist[dv > 5 ? 5 : dv]++;
+                            if (b1 > 1150) {    /* over ~15 ms: a frame at risk */
+                                u8 q; profOverN++;
+                                for (q = 0; q < 8; q++) profOver[q] += profCur[q];
+                                if (profOverN <= 150) {
+                                    u16 o = (u16)(256 + (profOverN - 1) * 10);
+                                    SRAM_enable();
+                                    SRAM_writeByte(o++, (u8)(it >> 8)); SRAM_writeByte(o++, (u8)it);
+                                    for (q = 0; q < 8; q++) { u32 v = profCur[q] / 10; SRAM_writeByte(o++, (u8)(v > 255 ? 255 : v)); }
+                                    SRAM_disable();
+                                }
+                            }
+                        }
+                        { u8 q; for (q = 0; q < 8; q++) profCur[q] = 0; }
+                        if (it == 60) { u8 q; for (q = 0; q < 8; q++) profSum[q] = 0; }
+                        if (it == JAZZ_PROFDUMP) {
+                            u16 o = 0; u8 q, k;
+                            SRAM_enable();
+                            SRAM_writeByte(o++, 'P'); SRAM_writeByte(o++, 'R');
+                            for (q = 0; q < 8; q++) for (k = 0; k < 4; k++) SRAM_writeByte(o++, (u8)(profSum[q] >> (24 - 8 * k)));
+                            for (k = 0; k < 4; k++) SRAM_writeByte(o++, (u8)(profBusy >> (24 - 8 * k)));
+                            for (k = 0; k < 4; k++) SRAM_writeByte(o++, (u8)(profIter >> (24 - 8 * k)));
+                            SRAM_writeByte(o++, (u8)(profBusyMax >> 8)); SRAM_writeByte(o++, (u8)profBusyMax);
+                            for (q = 0; q < 6; q++) { SRAM_writeByte(o++, (u8)(profHist[q] >> 8)); SRAM_writeByte(o++, (u8)profHist[q]); }
+                            for (q = 0; q < 8; q++) for (k = 0; k < 4; k++) SRAM_writeByte(o++, (u8)(profOver[q] >> (24 - 8 * k)));
+                            for (k = 0; k < 4; k++) SRAM_writeByte(o++, (u8)(profOverN >> (24 - 8 * k)));
+                            SRAM_writeByte(o++, (u8)(profDmaMax >> 8)); SRAM_writeByte(o++, (u8)profDmaMax);
+                            SRAM_writeByte(o++, (u8)(profDmaOver >> 8)); SRAM_writeByte(o++, (u8)profDmaOver);
+                            SRAM_disable();
+                        }
+                    }
+#else
                     run_play_frame(in);
+#endif
 #ifdef JAZZ_MAPCHECK
                     if (it == 800) {
                         /* result for the test script: M,A,P,C then 1 = no mismatch (windows needing more than 64 distinct blocks cannot all be cached and are not counted) */

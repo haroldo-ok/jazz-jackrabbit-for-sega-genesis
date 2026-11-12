@@ -39,12 +39,18 @@ static Jj1LevelData jj1_level_data(u8 stage)
  * once and kept: the pointer table, a flat class byte per event id, and
  * whether the level has any bridge at all (most do not, and finding out costs
  * a nine-cell scan per probe). */
+#define JJ1_MAX_BRIDGES 48
 static struct {
     u8 stage;
     Jj1LevelData d;
     u8 klass[128];
     u8 hasBridge;
     u8 bridgeRows[8];       /* bit per grid row that holds a bridge event */
+    /* The bridges themselves, in row order, so a probe on a bridge row
+       checks that row's few spans instead of scanning nine grid cells. */
+    struct { s16 startX, endX, deckY; u8 blockX; } bridge[JJ1_MAX_BRIDGES];
+    u8 bridgeFirst[65];     /* index of each row's first bridge */
+    u8 bridgeListed;        /* the list holds every bridge of the level */
 } L = { .stage = 0xFF };
 
 static Jj1Fast F = { 0, 0, 0, 0, 0, 0xFF, 0 };
@@ -57,18 +63,48 @@ static const Jj1LevelData *lvl(u8 stage)
         for (i = 0; i < 128; i++) L.klass[i] = jj1_event_info(stage, (u8)i)->klass;
         L.hasBridge = 0;
         for (i = 0; i < 8; i++) L.bridgeRows[i] = 0;
-        for (i = 0; i < (u16)(256 * 64); i++) {
-            u8 e = L.d.events[i];
-            if ((e < 128) && (L.klass[e] == JJ1_CLASS_BRIDGE)) {
-                L.hasBridge = 1;
-                L.bridgeRows[i >> 11] |= (u8)(1 << ((i >> 8) & 7));
+        {
+            u8 count = 0;
+            u16 row, x;
+            const u8 *ev = L.d.events;
+            L.bridgeListed = 1;
+            for (row = 0; row < 64; row++) {
+                L.bridgeFirst[row] = count;
+                for (x = 0; x < 256; x++) {
+                    const u8 e = *ev++;
+                    const Jj1EventInfo *info;
+                    if ((e >= 128) || (L.klass[e] != JJ1_CLASS_BRIDGE)) continue;
+                    L.hasBridge = 1;
+                    L.bridgeRows[row >> 3] |= (u8)(1 << (row & 7));
+                    if (count >= JJ1_MAX_BRIDGES) { L.bridgeListed = 0; continue; }
+                    info = jj1_event_info(stage, e);
+                    L.bridge[count].blockX = (u8)x;
+                    L.bridge[count].startX = (s16)(x << 5);
+                    L.bridge[count].endX = (s16)((x << 5) + (s16)info->param * (s16)info->strength);
+                    L.bridge[count].deckY = (s16)((row << 5) + info->points);
+                    count++;
+                }
             }
+            L.bridgeFirst[64] = count;
         }
         L.stage = stage;
         F.stage = 0xFF;
     }
     return &L.d;
 }
+
+/* Class of the event in a grid cell from the cached table: the same as
+ * jj1_event_info(stage, jj1_runtime_event(stage, x, y))->klass (an out-of-range
+ * cell and ids >= 128 read as event 0 / JJ1_CLASS_NONE there too). */
+static u8 cell_klass(u8 stage, s16 blockX, s16 blockY)
+{
+    const Jj1LevelData *d = lvl(stage);      /* also fills L.klass */
+    u8 e;
+    if ((blockX < 0) || (blockX >= 256) || (blockY < 0) || (blockY >= 64)) return L.klass[0];
+    e = d->events[((u16)blockY << 8) + blockX];
+    return (e < 128) ? L.klass[e] : JJ1_CLASS_NONE;
+}
+
 
 const u8 *jj1_runtime_events(u8 stage)
 {
@@ -120,6 +156,17 @@ static u8 bridge_deck(u8 stage, s16 cellX, s16 cellY)
     s16 scan;
     if (!L.hasBridge || (blockY < 0) || (blockY > 63)) return 0;
     if (!(L.bridgeRows[blockY >> 3] & (1 << (blockY & 7)))) return 0;
+    if (L.bridgeListed) {
+        /* the same test as the scan below, over this row's listed spans */
+        u8 n;
+        for (n = L.bridgeFirst[blockY]; n < L.bridgeFirst[blockY + 1]; n++) {
+            s16 bx = L.bridge[n].blockX;
+            if ((bx > blockX) || (bx <= blockX - 9)) continue;
+            if ((px >= L.bridge[n].startX) && (px < L.bridge[n].endX) &&
+                (py + 4 > L.bridge[n].deckY) && (py < L.bridge[n].deckY + 8)) return 1;
+        }
+        return 0;
+    }
     /* A span is at most 255 px, so eight blocks back always covers it. */
     for (scan = blockX; (scan >= 0) && (scan > blockX - 9); scan--) {
         u8 e = d->events[(((u16)blockY) << 8) + scan];
@@ -240,7 +287,9 @@ u16 jj1_runtime_spring_height(u8 stage, s16 x, s16 y, s16 w, s16 h, s16 *springT
     s16 bx, by;
     for (by = by0; by <= by1; by++) {
         for (bx = bx0; bx <= bx1; bx++) {
-            const Jj1EventInfo *info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
+            const Jj1EventInfo *info;
+            if (cell_klass(stage, bx, by) != JJ1_CLASS_SPRING) continue;
+            info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
             if (info->klass == JJ1_CLASS_SPRING) {
                 if (springTopY) *springTopY = by << 5;
                 return (u16)info->param * 21;
@@ -272,7 +321,9 @@ u8 jj1_runtime_tube_push(u8 stage, s16 x, s16 y, s16 w, s16 h,
     *targetY = 0;
     for (by = by0; by <= by1; by++) {
         for (bx = bx0; bx <= bx1; bx++) {
-            const Jj1EventInfo *info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
+            const Jj1EventInfo *info;
+            if (cell_klass(stage, bx, by) != JJ1_CLASS_TUBE) continue;
+            info = jj1_event_info(stage, jj1_runtime_event(stage, bx, by));
             if (info->klass == JJ1_CLASS_TUBE) {
                 s16 mag = (s16)(s8)info->param;          /* signed horizontal */
                 *pushX = (s16)(mag * 171);
@@ -301,8 +352,7 @@ u8 jj1_runtime_touches_end(u8 stage, s16 x, s16 y, s16 w, s16 h)
     s16 bx, by;
     for (by = by0; by <= by1; by++)
         for (bx = bx0; bx <= bx1; bx++)
-            if (jj1_event_info(stage, jj1_runtime_event(stage, bx, by))->klass
-                == JJ1_CLASS_END) return 1;
+            if (cell_klass(stage, bx, by) == JJ1_CLASS_END) return 1;
     return 0;
 }
 
