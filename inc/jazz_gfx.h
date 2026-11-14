@@ -155,9 +155,14 @@ typedef struct {
     const Jj1EventSprite *bossSpikeLeft;
     s16 bossSpikeX, bossSpikeY;
     s16 bossSpikeLeftX, bossSpikeLeftY;
+    /* Lite cartridge: blockTiles, spriteTiles and playerTiles are pools of
+     * distinct tiles, and logical tile i is pool tile index[i]. */
+    const u16 *blockIndex;
+    const u16 *spriteIndex;
+    const u16 *playerIndex;
 } Jj1StageArt;
 
-extern const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT];
+/* The per-stage table itself is in the episode pack (inc/jj1_pack.h). */
 extern const u32 jazz_gem_tile[8];
 extern const u32 jazz_bullet_tile[8];
 extern const u16 jazz_pal0[16];
@@ -165,29 +170,4 @@ extern const u16 jazz_pal2[16];
 extern const u16 jazz_pal3[16];
 extern const u32 jj1_sky_tiles[64];
 extern const u16 jj1_sky_palette[16];
-extern const u32 jj1_level0_screen_tiles[JJ1_LEVEL0_SCREEN_TILES * 8];
-extern const u16 jj1_level0_screen_palette[16];
-extern const u32 jj1_level0_block_tiles[240 * JJ1_BLOCK_TILE_COUNT * 8];
-extern const u8 jj1_level0_blocks[256 * 64];
-extern const u8 jj1_level0_events[256 * 64];
-extern const u8 jj1_level0_masks[(240 + 16) * 8];
-extern const u16 jj1_level0_start_x, jj1_level0_start_y;
-extern const u16 jj1_level0_palette[16];
-extern const u32 jj1_level1_block_tiles[240 * JJ1_BLOCK_TILE_COUNT * 8];
-extern const u8 jj1_level1_blocks[256 * 64];
-extern const u8 jj1_level1_events[256 * 64];
-extern const u8 jj1_level1_masks[(240 + 16) * 8];
-extern const u16 jj1_level1_start_x, jj1_level1_start_y;
-extern const u16 jj1_level1_palette[16];
-extern const u32 jj1_level2_block_tiles[240 * JJ1_BLOCK_TILE_COUNT * 8];
-extern const u8 jj1_level2_blocks[256 * 64];
-extern const u8 jj1_level2_events[256 * 64];
-extern const u8 jj1_level2_masks[(240 + 16) * 8];
-extern const u16 jj1_level2_start_x, jj1_level2_start_y;
-extern const u16 jj1_level2_palette[16];
-extern const u32 jj1_level1_screen_tiles[JJ1_LEVEL0_SCREEN_TILES * 8];
-extern const u16 jj1_level1_screen_palette[16];
-extern const u32 jj1_level2_screen_tiles[JJ1_LEVEL0_SCREEN_TILES * 8];
-extern const u16 jj1_level2_screen_palette[16];
-
 #endif

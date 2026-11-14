@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import math
 import os
 import struct
@@ -55,6 +56,17 @@ TRACKS = {                   # output name -> module
     "diamondus": "SONG0.PSM",
     "tubelectric": "SONG3.PSM",
     "medivo": "SONG17.PSM",
+    # the other episodes (full game); PCM instruments are picked by name
+    "letni": "SONG7.PSM", "technoir": "SONG2.PSM", "orbitus": "SONG11.PSM",
+    "fanolint": "SONG8.PSM", "scraparap": "SONG14.PSM", "megairbase": "SONG16.PSM",
+    "turtemple": "SONG4.PSM", "nippius": "SONG5.PSM", "jungrock": "SONG6.PSM",
+    "marbelara": "SONG9.PSM", "sluggion": "SONG1.PSM", "dreempipes": "SONG13.PSM",
+    "pezrock": "SONG12.PSM", "chrysilis": "SONG10.PSM", "battleships": "SONG15.PSM",
+    "boss": "BOSS.PSM", "ending": "ENDSONG.PSM",
+    "exoticus": "SONGCD0.PSM", "industrius": "SONGCD1.PSM", "muckamok": "SONGCD2.PSM",
+    "raneforus": "SONGCD3.PSM", "stonar": "SONGCD4.PSM", "deckstar": "SONGCD5.PSM",
+    "deserto": "SONGCD7.PSM", "lagunicus": "SONGCD8.PSM",
+    "xmas_1": "XM2.PSM", "xmas_2": "XM3.PSM",
 }
 # Instruments played as PCM: everything the old conversion had to put on its
 # single PCM stream or on PSG noise (drums, cymbals, hats, shakers, one-shot
@@ -67,6 +79,54 @@ PCM_INSTRUMENTS = {
     "tubelectric": {"BDDRM.ST", "shaker.st", "SNAREVER.ST", "REALCYMC.ST"},
     "medivo": {"bassd2.st", "SNAREV2.st", "OPCCHH.ST", "CLCCHH.ST", "ohme.st", "Lorchit2.st"},
 }
+# For the tracks without a hand-made list, the same rule the FM arrangement was
+# made with (s3m2vgm_fm.py in haroldo-ok/convert-s3m-vgm-jazzjackrabbit-md):
+# what that converter sent to its PCM stream or to PSG noise is percussion.
+NOISE_KEYS = ['hh', 'hihat', 'hat', 'shaker', 'shak.', 'maraca', 'tamb', 'chh']
+DRUM_KEYS = ['drum', 'bddrm', 'bassd', 'bd1', 'bd.', 'funkbd', 'kick',
+             'snare', 'snar', 'sd1', 'sd2', 'funksd', 'fogsd', 'airsn', 'rx5',
+             'tom', 'cym', 'ride', 'hit', 'clap', 'rim', 'conga', 'bongo',
+             'block', 'scra', 'brkglass', 'reverss', 'desert1', 'ntrdr',
+             'lazer', 'rangle', 'hoowa', 'ohme', 'bdbd', 'kraftwerk', 'wellfx',
+             'jackr', 'sweep\x00', 'marshy', 'if_you', 'level ', 'drive me']
+PSG_TONE_KEYS = ['beep', 'sine', 'moog', 'square', 'sinecz']
+PATCH_KEYS = ['bas', 'synb', 'drgn', 'pink', 'monster', 'fretls', 'hyperb', 'horn', 'trump',
+              'syntrup', 'sax', 'u20', 'stern', 'string', 'sus 2', 'sawsus', 'orb2', 'reverb',
+              'chor', 'metalcho', 'weow', 'aah', 'ooh', 'flt', 'flut', 'shaka', 'ocar',
+              'whistl', 'bell', 'glock', 'celest', 'marim', 'vibra', 'd50', 'zine', 'stopoff',
+              'organ', 'call', 'pian', 'richp', 'rhp', 'gpiano', 'git', 'guit', 'ringuit',
+              'wec', 'jahrmark', 'bright', 'arcadia', 'filma', 'filmi', 'melo', 'dx_st',
+              'harp', 'ieee', 'saw', 'analog', 'lfowave', 'lead', 'kla4', 'atak', 'hollow',
+              'holow', 'sweepup', 'moog']
+
+
+def auto_pcm_instruments(m, notes):
+    """Names of the module's percussion samples, by the rule above."""
+    variety = collections.defaultdict(set)
+    for n in notes:
+        variety[n["smp"]].add(n["note"])
+    out = set()
+    for key, smp in m.samples.items():
+        name = smp["name"].lower()
+        if smp["length"] < 300:
+            continue
+        bd_like = any(k in name for k in ('bd', 'bassd', 'drum', 'snar', 'kick'))
+        if any(k in name for k in NOISE_KEYS) and not bd_like:
+            out.add(smp["name"]); continue
+        if any(k in name for k in PSG_TONE_KEYS):
+            continue
+        if any(k in name for k in DRUM_KEYS):
+            out.add(smp["name"]); continue
+        if any(k in name for k in PATCH_KEYS):
+            continue
+        looped = bool(smp.get("loop"))
+        if len(variety[key]) >= 3 or looped:
+            continue
+        if smp["length"] < 5000:
+            out.add(smp["name"])
+    return out
+
+
 # XGM channel for each drum channel rank (0 = busiest); the effects use
 # channel 3 (jump) the most, then 2 (shots), then 4 (pickups).
 RANK_TO_CHANNEL = [0, 1, 3, 2]
@@ -118,8 +178,9 @@ class Group:
         return rep, length
 
 
-def plan_groups(notes):
-    """Group notes into at most MAX_SAMPLES renderings."""
+def plan_groups(notes, max_ids=None):
+    """Group notes into at most MAX_SAMPLES (or max_ids) renderings."""
+    MAX = max_ids or MAX_SAMPLES
     for n in notes:
         f0 = n["env"][0][0] if n["env"] else 0
         n["pitchsig"] = trim(round(semis(f, f0) * 8) for f, _ in n["env"]) if f0 else (0,)
@@ -127,10 +188,15 @@ def plan_groups(notes):
     for n in notes:
         by[(n["smp"], n["note"], n["pitchsig"])].append(n)
     # too many slide shapes: play the rarest ones at a steady pitch
-    while len(by) > MAX_SAMPLES:
+    while len(by) > MAX:
         slides = [k for k in by if len(k[2]) > 1]
         if not slides:
-            raise SystemExit("more than %d distinct sample/pitch pairs" % MAX_SAMPLES)
+            # merge the rarest sample/pitch pair into the commonest of its sample
+                k = min(by, key=lambda k: len(by[k]))
+                same = [j for j in by if j != k and j[0] == k[0]] or [j for j in by if j != k]
+                into = max(same, key=lambda j: len(by[j]))
+                by[into].extend(by.pop(k))
+                continue
         k = min(slides, key=lambda k: len(by[k]))
         steady = (k[0], k[1], (0,))
         for n in by.pop(k):
@@ -138,7 +204,7 @@ def plan_groups(notes):
             by[steady].append(n)
     groups = [Group(k, v) for k, v in by.items()]
     # spare ids: separate the volume levels that are furthest from their group
-    while len(groups) < MAX_SAMPLES:
+    while len(groups) < MAX:
         cand = [(g.error() - s[0], g, s) for g in groups for s in [g.split()] if s]
         if not cand:
             break
@@ -203,13 +269,15 @@ def render(rep, length, smp, tick_len, loop_cap=None):
     return out[:loud[-1] + 1] if len(loud) else out[:0]
 
 
-def strip_vgm(vgm: bytes) -> bytes:
-    """The VGM without its PCM streams and with the PSG noise silenced."""
+def strip_vgm(vgm: bytes, keep_noise: bool = False) -> bytes:
+    """The VGM without its PCM streams and (unless keep_noise) with the PSG
+    noise silenced."""
     data_off = struct.unpack_from("<I", vgm, 0x34)[0] + 0x34
     loop_rel = struct.unpack_from("<I", vgm, 0x1C)[0]
     loop_abs = loop_rel + 0x1C if loop_rel else None
     out = bytearray(vgm[:data_off])
-    out += bytes([0x50, 0xFF])                 # noise channel silent
+    if not keep_noise:
+        out += bytes([0x50, 0xFF])             # noise channel silent
     new_loop = None
     i = data_off
     latched = 0
@@ -246,7 +314,7 @@ def strip_vgm(vgm: bytes) -> bytes:
             v = vgm[i + 1]
             if v & 0x80:
                 latched = (v >> 5) & 3
-                if latched == 3 and (v & 0x10):
+                if latched == 3 and (v & 0x10) and not keep_noise:
                     # noise volume -> silent (dropping the writes crashes xgmtool)
                     out += bytes([0x50, 0xFF])
                     i += n
@@ -297,7 +365,17 @@ def xgm_frames(xgm: bytes):
     return frames, target, open_end
 
 
+_FM_CACHE = {}
+
+
 def fm_part(vgm_path: Path, xgmtool: Path, work: Path):
+    if str(vgm_path) in _FM_CACHE:
+        return _FM_CACHE[str(vgm_path)]
+    _FM_CACHE[str(vgm_path)] = _fm_part(vgm_path, xgmtool, work)
+    return _FM_CACHE[str(vgm_path)]
+
+
+def _fm_part(vgm_path: Path, xgmtool: Path, work: Path):
     stripped = work / (vgm_path.stem + "_fm.vgm")
     stripped.write_bytes(strip_vgm(vgm_path.read_bytes()))
     out = work / (vgm_path.stem + "_fm.xgm")
@@ -306,20 +384,64 @@ def fm_part(vgm_path: Path, xgmtool: Path, work: Path):
     return xgm_frames(out.read_bytes())
 
 
-def convert(name: str, path: Path, vgm_path: Path, out_path: Path, xgmtool: Path, work: Path):
-    m, song, notes, total, loop_time, tick_len = jj1_psm.play(str(path))
-    wanted = PCM_INSTRUMENTS[name]
+def convert(name: str, path: Path, vgm_path: Path, out_path: Path, xgmtool: Path, work: Path,
+            budget: int = None):
+    """budget: largest XGM in bytes.  The drum renderings are then cut short
+    (with a short fade) and, if that is not enough, fewer distinct pitch and
+    volume renderings are kept, until the file fits.  None = no limit."""
+    if budget is None:
+        return _convert(name, path, vgm_path, out_path, xgmtool, work, None, None)
+    # Longer hits matter more than separate volume levels (XGM has no
+    # volume control, so each level is its own rendering): try the longest
+    # tails first, with as many renderings as still fit.
+    caps = (2.0, 1.0, 0.7, 0.5, 0.4, 0.33, 0.28, 0.24, 0.21, 0.18, 0.15, 0.12, 0.1, 0.08, 0.06, 0.05)
+    tries = [(cap, ids) for cap in caps for ids in (MAX_SAMPLES, 48, 36, 28, 20, 14, 10)]
+    tries += [(cap, ids) for cap in caps[-6:] for ids in (8, 6, 4)]
+    for cap, max_ids in tries:
+        info = _convert(name, path, vgm_path, out_path, xgmtool, work, cap, max_ids)
+        if info["size"] <= budget:
+            info.update(cap=cap, ids=max_ids)
+            return info
+    info = _convert(name, path, vgm_path, out_path, xgmtool, work, 0.0, 1, drums=False)
+    info.update(cap=0, ids=0)
+    return info
+
+
+_RENDER_CACHE = {}
+_PLAY_CACHE = {}
+
+
+def _convert(name, path, vgm_path, out_path, xgmtool, work, cap, max_ids, drums=True):
+    if str(path) not in _PLAY_CACHE:
+        _PLAY_CACHE[str(path)] = jj1_psm.play(str(path))
+    m, song, notes, total, loop_time, tick_len = _PLAY_CACHE[str(path)]
+    notes = copy.deepcopy(notes)
+    wanted = PCM_INSTRUMENTS.get(name)
+    if wanted is None:
+        wanted = auto_pcm_instruments(m, notes)
     notes = [n for n in notes if n["env"] and n["env"][0][0] > 0 and m.samples[n["smp"]]["name"] in wanted]
     # drum channel -> XGM channel by number of hits
     hits = collections.Counter(n["ch"] for n in notes)
     rank = [c for c, _ in hits.most_common()]
-    chan_of = {c: RANK_TO_CHANNEL[r] for r, c in enumerate(rank)}
+    chan_of = {c: RANK_TO_CHANNEL[r % 4] for r, c in enumerate(rank)}
 
-    groups = plan_groups(notes)
+    if not drums:
+        notes = []
+    groups = plan_groups(notes, max_ids) if notes else []
     renders = []
     for g in groups:
         rep, length = g.representative()
-        renders.append(render(rep, length, m.samples[g.key[0]], tick_len))
+        key = (str(path), g.key, len(g.insts), max_ids, round(length, 4))
+        if key not in _RENDER_CACHE:
+            _RENDER_CACHE[key] = render(rep, length, m.samples[g.key[0]], tick_len)
+        r = _RENDER_CACHE[key]
+        if cap is not None and len(r) > int(cap * RATE):
+            # cut the tail, with a 20 ms fade
+            r = r[:int(cap * RATE)].copy()
+            nf = min(len(r), int(0.02 * RATE))
+            if nf:
+                r[-nf:] *= np.linspace(1.0, 0.0, nf)
+        renders.append(r)
         for n in g.insts:
             n["gid"] = len(renders) - 1
 
@@ -399,13 +521,19 @@ def main() -> int:
     ap.add_argument("--music", type=Path, default=root / "res" / "music")
     ap.add_argument("--xgmtool", type=Path,
                     default=Path(os.environ.get("GDK", "/opt/sgdk")) / "bin" / "xgmtool")
+    ap.add_argument("--only", nargs="*", help="convert just these tracks")
+    ap.add_argument("--missing", action="store_true", help="skip tracks whose .xgm exists")
     args = ap.parse_args()
     total = 0
     with tempfile.TemporaryDirectory() as tmp:
         for name, mod in TRACKS.items():
+            if args.only and name not in args.only:
+                continue
             src = args.input / mod
-            if not src.exists():
-                print(f"skip {name}: {src} missing")
+            if not src.exists() or not (args.music / f"{name}.vgm").exists():
+                print(f"skip {name}: {src} or its FM arrangement missing")
+                continue
+            if args.missing and (args.music / f"{name}.xgm").exists():
                 continue
             info = convert(name, src, args.music / f"{name}.vgm", args.music / f"{name}.xgm",
                            args.xgmtool, Path(tmp))

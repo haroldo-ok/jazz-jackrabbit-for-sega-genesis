@@ -11,6 +11,8 @@ void jj1_show_original_title(void);
 void jj1_show_original_menu(unsigned char option);
 void jj1_set_menu_option(unsigned char option);
 void jj1_play_episode_ending(const unsigned char *music);
+/* NEW GAME's episode screen: the pack to play, 0xFE = bonus levels, 0xFF = back */
+unsigned char jj1_play_episode_menu(void);
 void jj1_play_level_clear(const unsigned char *music);
 void jj1_play_bonus_clear(const unsigned char *music);
 #endif

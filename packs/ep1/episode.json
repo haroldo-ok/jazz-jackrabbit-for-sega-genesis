@@ -1,0 +1,38 @@
+{
+ "episode": 1,
+ "title": "TURTLE TERROR",
+ "worlds": "DIAMONDUS TUBELECTRIC MEDIVO",
+ "stages": 7,
+ "levels": [
+  "LEVEL0.000",
+  "LEVEL1.000",
+  "LEVEL0.001",
+  "LEVEL1.001",
+  "LEVEL0.002",
+  "LEVEL1.002",
+  "LEVEL0.018"
+ ],
+ "music": [
+  "diamondus",
+  "tubelectric",
+  "medivo",
+  "boss"
+ ],
+ "planets": [
+  "000",
+  "001",
+  "002",
+  "018"
+ ],
+ "ending": [
+  "ending_0",
+  "ending_1",
+  "ending_2",
+  "ending_3"
+ ],
+ "bonus": [
+  0,
+  1,
+  2
+ ]
+}

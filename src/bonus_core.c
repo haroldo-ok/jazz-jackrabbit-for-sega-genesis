@@ -30,28 +30,44 @@
 s32 bonus_sin(s32 angle) { return jj1_bonus_sin[angle & 1023]; }
 s32 bonus_cos(s32 angle) { return jj1_bonus_sin[(angle + 256) & 1023]; }
 
-void bonus_init(BonusGame *b, u8 level, const u8 *floorTiles, const u8 *masks,
-                const u8 *grid, const u8 *events)
+void bonus_init_meta(BonusGame *b, const BonusMeta *meta, const u8 *floorTiles,
+                     const u8 *masks, const u8 *grid, const u8 *events)
 {
     u8 i;
-    if (level >= BONUS_LEVELS) level = 0;
     b->floorTiles = floorTiles; b->masks = masks; b->grid = grid; b->events = events;
     for (i = 0; i < 16; i++) {
-        b->evType[i] = jj1_bonus_meta[level].type[i];
-        b->evPass[i] = jj1_bonus_meta[level].passable[i];
-        b->evUsed[i] = jj1_bonus_meta[level].used[i];
-        b->evSound[i] = jj1_bonus_meta[level].sound[i];
+        b->evType[i] = meta->type[i];
+        b->evPass[i] = meta->passable[i];
+        b->evUsed[i] = meta->used[i];
+        b->evSound[i] = meta->sound[i];
     }
-    b->items = jj1_bonus_meta[level].items;
-    b->endTime = (s32)jj1_bonus_meta[level].seconds * 1000;
+    b->items = meta->items;
+    b->endTime = (s32)meta->seconds * 1000;
     b->ticks = BONUS_STEP_MS;
-    b->x = ((s32)jj1_bonus_meta[level].startX << 15) + F16;
-    b->y = ((s32)jj1_bonus_meta[level].startY << 15) + F16;
+    b->x = ((s32)meta->startX << 15) + F16;
+    b->y = ((s32)meta->startY << 15) + F16;
     b->z = 0; b->dz = 0; b->dr = 0; b->da = 0;
     b->direction = FQ;
     b->running = 0; b->crashed = 0; b->jumping = 0;
     b->gems = 0; b->removedCount = 0; b->sound = 0; b->gotTime = 0;
     for (i = 0; i < 32; i++) b->removedRows[i] = 0;
+}
+
+void bonus_init(BonusGame *b, u8 level, const u8 *floorTiles, const u8 *masks,
+                const u8 *grid, const u8 *events)
+{
+    BonusMeta meta;
+    u8 i;
+    if (level >= BONUS_LEVELS) level = 0;
+    meta.seconds = jj1_bonus_meta[level].seconds; meta.items = jj1_bonus_meta[level].items;
+    meta.startX = jj1_bonus_meta[level].startX; meta.startY = jj1_bonus_meta[level].startY;
+    for (i = 0; i < 16; i++) {
+        meta.type[i] = jj1_bonus_meta[level].type[i];
+        meta.passable[i] = jj1_bonus_meta[level].passable[i];
+        meta.used[i] = jj1_bonus_meta[level].used[i];
+        meta.sound[i] = jj1_bonus_meta[level].sound[i];
+    }
+    bonus_init_meta(b, &meta, floorTiles, masks, grid, events);
 }
 
 static int is_removed(const BonusGame *b, u16 cell)

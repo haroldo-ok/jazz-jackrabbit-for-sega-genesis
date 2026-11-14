@@ -1,8 +1,37 @@
 # Jazz Jackrabbit — Genesis / Mega Drive SGDK port (work in progress)
 
-An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a bootable `JazzJackrabbitGenesis.bin` ROM with seven converted episode stages across Diamondus, Tubelectric and Medivo, using original maps, collision masks, event grids and start positions. It remains a work in progress; see `PORTING_STATUS.md`.
+An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a bootable 5 MB `JazzJackrabbitGenesis.bin` with every episode the build is given: episode 1 (shareware, checked in) and, from your own copy of the CD / registered game, episodes 2-9 and Holiday Hare — 66 stages using the original maps, collision masks, event grids and start positions. It remains a work in progress; see `PORTING_STATUS.md`.
 
 > **Current scope / legal status:** the repository ships with a **locally converted JJ1 pack** derived from a user-supplied shareware installation: `MAINCHAR.000` Jazz animation frames, `BLOCKS.000` terrain patterns, the available episode 1 level grids with their 8×8 collision masks, event layers and start records, plus converted scene, menu and sound assets. It does **not** include the raw installation or archive. OpenJazz is GPL-2.0-or-later and original game data remains subject to its own rights. Additional episodes/levels require the corresponding original level files (see *Regenerating data* below).
+
+## One cartridge, all episodes (5 MB)
+
+`make` builds a single 5 MB cartridge with every converted episode:
+
+```bash
+# once, from the JAZZ directory of the CD / registered game (episodes 2-9, Holiday Hare,
+# the episode-selection screen):
+python3 tools/build_packs.py generate --input /path/to/JAZZ
+# then (JAZZ_DATA is needed the first time, to convert the music; the shareware
+# directory is enough when only episode 1 is present):
+make GDK=/path/to/sgdk JAZZ_DATA=/path/to/JAZZ
+```
+
+Without the extra episodes the same build gives an episode-1 cartridge; that is the `JazzJackrabbitGenesis.bin` kept in git. Episodes 2-10, the episode-selection pictures and the converted music are made from your own copy and are not kept in git.
+
+- **Choosing an episode:** **NEW GAME** opens the original episode-selection screen: the list (1-6, A-C, X, Z bonus levels) with the selected row black on white and the episode's picture beside it, converted from the game's `MENU.000` and `FONTMN2.0FN` by `tools/build_episode_menu.py` (positions and colours as in the original; the screen is shifted 2 px right and 10 px down inside the Genesis' 224 lines so the highlight bar sits on whole tiles). UP/DOWN choose, A/START play, B/C go back. Episodes the cartridge does not carry are drawn in red with a grey picture, as the original does. A saved game remembers its episode. Without the full game's data NEW GAME starts episode 1 directly.
+- **How it fits:** `tools/build_packs.py` converts and links each episode; `tools/build_cartridge.py` turns those into compact packs and assembles the ROM:
+  - tile graphics become a pool of distinct 8x8 tiles plus a compact index (a u16 base per 16 tiles, a byte per tile, a small exception list); enemies' walk/fly cycles reuse every second frame; each world keeps 33 % of its distinct tiles and enemies/items 65 %, the rest drawn with the nearest kept tile; Jazz and the items keep every frame and tile;
+  - each level's 256x64 map and event grid are aPLib-packed and unpacked into RAM when the stage starts (so the program gives SGDK's DMA queue a 4 KB buffer instead of 8 KB);
+  - the music keeps its FM/PSG arrangement plus PCM drums cut down to fit 53 KB per track (drum hits 60 ms-2 s, typically 0.2-0.5 s);
+  - planet approaches, level/bonus clear and episode endings are short text screens, and every episode plays episode 1's three bonus levels; the instructions and order info are one text page each.
+- **Layout:** the program from `$000000`, the episode packs after it up to `$380000`, then the music in ROM banks 7-9. `jj1_music_start` maps the track's bank at `$380000` (SSF2 register `$A130FF`, with the Z80 held off the bus) before playing it. Nothing else is ever bank-switched, so the game runs on emulators without SSF2 support; on those, only the tracks stored in banks 8 and 9 would play wrongly.
+- **Knobs** (`tools/build_cartridge.py packs`): `--music-budget` (default 53 KB), `--world-keep` (0.33), `--sprite-keep` (0.65), `--player-keep` (1.0). The defaults leave about 13 KB free.
+- **Guardians:** Devan's machine (episode 1) keeps its own state machine. The other guardians are ordinary events with modifier 8 in the original; they are enemies with their hit points whose defeat ends the level. They walk or stand rather than following each one's original movement pattern.
+
+### What happened to the 31 MB "full" cartridge
+
+The first all-episodes build was a 31 MB cartridge: the program in the first 2 MB, and behind it two packs per episode (stage data and music; planet screens, the animated ending and the episode's own bonus maps) at full quality, swapped into `$200000-$3FFFFF` by writing four SSF2 bank registers whenever the game moved between a stage, a planet approach, a bonus level and the ending. It ran in Genesis Plus GX, where it was developed and tested, but **failed on most of the other emulators it was tried on**. The likely reason is that few emulators support SSF2 bank switching over the whole upper window, or cartridges far beyond the 4-5 MB that real games used; this was not investigated further. A smaller "lite" cartridge made alongside it — compact packs, text screens, the music banks as the only switched part — worked on the emulators it was tried on, so it became the only cartridge and the full version was removed: its 31 MB ROM, the pack-switching code, the aux packs, the converted startup / planet / clear / ending animations and the original instruction and order pictures, together with their converters (`tools/build_episode_ending.py`, `tools/build_menu_pages.py`) and tests. What the lite cartridge gave up in exchange is listed under *How it fits* above. The history is in git.
 
 ## What is implemented
 
@@ -10,7 +39,7 @@ An SGDK port of *Jazz Jackrabbit* for the Sega Genesis / Mega Drive. It builds a
 - **Data-driven entities from the original event grids**: items (score/health/extra-life), walking and flying enemies, static hazards, springs (button-independent relaunch of the same jump-ascent rule), one-way platforms, and end-of-level signs are all resolved through per-level event tables in `src/jj1_eventset.c`. A taken-bitmap makes items collect once and killed enemies stay dead; an 8-slot pool activates enemies near the player, scanning one grid column per frame to bound 68000 cost.
 - **Original rendering path**: streaming 64-block VRAM cache over the 256×64 maps on Plane A, sky gradient on Plane B, HUD, camera, springs and uncollected items drawn straight from the event grid.
 - **Episode flow** with exits, transitions, lives/health, pause, game over, and completion.
-- **Original-art presentation**: startup animation and credit pages, title, six highlighted menu choices, level-clear animation, and bonus-win animation. Screen palettes are reduced for Genesis hardware. All six menu actions work, including original instruction and order pages, four SRAM save slots, and Genesis-specific setup options.
+- **Presentation**: the original title and main menu (six highlighted choices) and the original episode-selection screen; planet approaches, level/bonus clear and endings are text screens. Screen palettes are reduced for Genesis hardware. All six menu actions work, including instruction and order text pages, four SRAM save slots, and Genesis-specific setup options.
 
 Platform-neutral logic lives in `src/game_core.c` + `src/jj1_runtime.c` and compiles unchanged on the host for testing and inside the ROM.
 
@@ -43,18 +72,6 @@ python3 tools/build_shot_sounds.py --input /path/to/shareware --output res/jj1
 
 The weapon clips use the original shareware bullet sound slots and their recorded rates. SGDK converts them to the XGM driver’s fixed playback rate. The fourth special shot has no assigned firing sound in these levels.
 
-### Planet approaches and episode ending
-
-```sh
-python3 tools/build_planets.py --input /path/to/shareware
-python3 tools/build_episode_ending.py --input /path/to/shareware
-```
-
-These generate the original shareware planet/ending tile assets and scene data.
-Planet scaling is sampled at 10 Hz; the original ENDE1 text pages wait for a
-button and its animation plays at 14 fps. See `PORTING_STATUS.md` for remaining
-scene, menu and gameplay limitations.
-
 ## Main menu and saves
 
 Use UP/DOWN and START in the main menu. **Load Game** offers four slots. To
@@ -65,21 +82,13 @@ resumes that state in the level. Saves and settings require persistent cartridge
 SRAM or an emulator that saves its `.srm` data. They are not DOS/OpenJazz saves
 and may not be compatible with future versions of this work-in-progress port.
 
-**Instructions** and **Order Info** contain the original shareware pages.
-A/START/RIGHT/DOWN advances, LEFT/UP goes back, and B/C exits. Original DOS
-key hints are retained as artwork; the bottom line gives Genesis controls.
-Order details are historical and may no longer be valid.
+**Instructions** shows the Genesis controls and **Order Info** what the
+cartridge holds, one text page each; A/START/C closes them.
 
 **Setup Options** toggles music and effects and selects among A-fire/B-jump,
 B-fire/A-jump, and C-fire/B-jump layouts (the remaining button cycles weapons).
 Settings persist in SRAM. Bonus stages use the configured fire button to run
 and either other button to jump. The main-menu, viewer and pause controls stay fixed.
-
-To regenerate the original information pages:
-
-```sh
-python3 tools/build_menu_pages.py --input /path/to/shareware
-```
 
 ## Bonus levels
 
@@ -162,13 +171,13 @@ python3 tools/build_sgdk_bonus.py --input ~/jazz/JAZZ    # writes res/bonus/*.bi
 python3 tools/build_bonus_player.py --input ~/jazz/JAZZ # writes src/jj1_bonus_player.inc
 ```
 
-## Startup, title, menu and clear scenes
+## Title and main menu
 
 ```bash
 python3 tools/build_sgdk_scenes.py --input ~/jazz/JAZZ
 ```
 
-This produces `res/scenes/*.bin` and `src/jj1_scene_data.inc` from the original `.0SC`, `MENU.000`, and `FONTMN2.0FN` files. The STARTUP `BLOCK3` sound is exported by `tools/import_jj1_shareware.py` from `SOUNDS.000` and copied to `res/jj1/BLOCK3.wav`. The converted End Level track is from the FM soundtrack converter linked in `THIRD_PARTY.md`.
+The cartridge uses `res/scenes/title.bin`, `menu_tiles.bin` and `menu_maps.bin` from this converter (it also still writes the cutscene frames, which the cartridge no longer uses); their palettes are in `src/jj1_title_palettes.inc`. The FM arrangements of the music are from the converter linked in `THIRD_PARTY.md`.
 
 ## Font
 

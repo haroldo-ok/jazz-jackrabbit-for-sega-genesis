@@ -35,9 +35,9 @@ if 'JJ1_DATA' in os.environ:
         subprocess.run([sys.executable,str(ROOT/'tools/build_sgdk_scenes.py'),
                         '--input',str(root),'--out-res',str(out),'--out-inc',str(inc)],
                        cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
-        for name in ('level_clear.bin','bonus_clear.bin','startup.bin','startup_credits.bin','title.bin','menu_tiles.bin','menu_maps.bin'):
+        # the cartridge keeps the title and the main menu (the cutscenes are text screens)
+        for name in ('title.bin','menu_tiles.bin','menu_maps.bin'):
             assert (out/name).read_bytes()==(ROOT/'res/scenes'/name).read_bytes(), f'{name} differs'
-        assert inc.read_bytes()==(ROOT/'src/jj1_scene_data.inc').read_bytes()
-    print('PASS: all shareware startup and clear-scene frames regenerate byte-for-byte')
+    print('PASS: scene decoding, and the title and main menu regenerate byte-for-byte')
 else:
     print('SKIP: set JJ1_DATA to verify scene conversion against the shareware files')

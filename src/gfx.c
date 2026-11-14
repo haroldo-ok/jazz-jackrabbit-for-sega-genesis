@@ -1,34 +1,9 @@
 #include <genesis.h>
 #include "jazz_gfx.h"
 
-/* Generated from the user-supplied JJ1 shareware installation by
- * tools/build_sgdk_jj1_visuals.py. It contains 4bpp Genesis-ready versions
- * of original terrain/detail pixels and Jazz's first animation frame. */
-/* Level art and world tile banks for the episode this ROM was built for. */
-#include "jj1_episode_includes.inc"
-
-/* One entry per stage, in the order the episode's level chain runs. */
-#define STAGE(n, world, mask) { \
-    jj1_world##world##_block_tiles, jj1_world##world##_palette, \
-    jj1_world##world##_cycles, JJ1_WORLD##world##_CYCLES, mask, jj1_level##n##_blocks, \
-    jj1_level##n##_pal1, jj1_level##n##_player_tiles, jj1_level##n##_player_states, \
-    jj1_level##n##_spring_tiles, \
-    jj1_level##n##_event_sprite_tiles, jj1_level##n##_event_sprites, \
-    &jj1_level##n##_bird_sprite, &jj1_level##n##_bird_left_sprite, \
-    &jj1_level##n##_shield_sprite, \
-    &jj1_level##n##_board_sprite, &jj1_level##n##_board_left_sprite, \
-    &jj1_level##n##_boss_cannon_sprite, &jj1_level##n##_boss_cannon_left_sprite, \
-    jj1_level##n##_boss_cannon_x, jj1_level##n##_boss_cannon_y, \
-    jj1_level##n##_boss_cannon_left_x, jj1_level##n##_boss_cannon_left_y, \
-    &jj1_level##n##_boss_late_sprite, &jj1_level##n##_boss_late_left_sprite, \
-    &jj1_level##n##_boss_spike_sprite, &jj1_level##n##_boss_spike_left_sprite, \
-    jj1_level##n##_boss_spike_x, jj1_level##n##_boss_spike_y, \
-    jj1_level##n##_boss_spike_left_x, jj1_level##n##_boss_spike_left_y }
-
-const Jj1StageArt jazz_stage_art[JAZZ_STAGE_COUNT] = {
-#include "jj1_episode_stages.inc"
-};
-
+/* Art every episode shares.  The stages' own art (tile banks, maps, sprites)
+ * is in the episode packs: pack/game_pack.c. */
+#include "jazz_world_tiles.inc"
 
 /* Original event sprites, when the importer has resolved them from the game
  * data (event -> animation -> sprite index -> SPRITES.<world>).  The ROM keeps

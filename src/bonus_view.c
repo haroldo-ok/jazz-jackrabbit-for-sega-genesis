@@ -14,6 +14,7 @@
 #include "jazz_gfx.h"
 #include "bonus_view.h"
 #include "jj1_bonus.h"
+#include "jj1_pack.h"
 #include "jj1_sounds.h"
 #include "jj1_bonus_data.inc"
 #include "jj1_bonus_player.inc"
@@ -417,6 +418,7 @@ static void floor_selftest(void)
 
 int bonus_play(u8 index, const u8 *music)
 {
+    /* Lite cartridge: episode 1's three maps, in the program. */
     static const u8 *const grids[3] = { jj1_bonus_grid0, jj1_bonus_grid1, jj1_bonus_grid2 };
     static const u8 *const events[3] = { jj1_bonus_events0, jj1_bonus_events1, jj1_bonus_events2 };
     int result = BONUS_CONTINUE;

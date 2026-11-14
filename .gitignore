@@ -31,5 +31,19 @@ res/jj1_music.h
 
 # Local SGDK boot files and generated scene resource header
 src/boot/
-res/jj1_scenes_res.h
 tools/__pycache__/
+
+# Episodes 2-9 and Holiday Hare come from the registered/CD game, so they are
+# not kept in git: anyone with their own copy regenerates them with
+#   python3 tools/build_packs.py generate --input <JAZZ dir>
+# Episode 1 (shareware) stays checked in under packs/ep1.
+packs/ep[2-9]/
+packs/ep10/
+# The episode-selection screen (from the full game's MENU.000)
+packs/menu/
+# Converted music (made from the game's modules by tools/build_lite.py)
+packs/music/
+# XGM files from tools/build_music.py (the cartridge's tracks are in packs/music)
+res/music/*.xgm
+# rescomp headers
+res/*.h

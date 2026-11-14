@@ -50,8 +50,12 @@ extern const u8 jj1_level7_events[256 * 64];
 extern const u8 jj1_level7_masks[(240 + 16) * 8];
 extern const u16 jj1_level7_start_x, jj1_level7_start_y;
 
+u8 jj1_runtime_stage_count(void);         /* stages in the episode being played */
+void jj1_runtime_invalidate(void);        /* the mapped episode changed */
 u8 jj1_runtime_event(u8 stage, s16 blockX, s16 blockY);
 const u8 *jj1_runtime_events(u8 stage);   /* the 256x64 event grid */
+const u8 *jj1_runtime_blocks(u8 stage);   /* the 256x64 block map */
+u8 *jj1_runtime_scratch(void);            /* lite: 32 KB of RAM outside a level */
 u8 jj1_runtime_klass(u8 stage, u8 id);   /* cached event class by id */
 const u8 *jj1_runtime_klass_table(u8 stage); /* the same, as a 128-entry table */
 /* The cached tables of one stage, for collision probes that cannot afford a

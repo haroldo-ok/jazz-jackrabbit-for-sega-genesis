@@ -603,7 +603,10 @@ static void kill_enemy(JazzGame *g, JazzEnemy *e)
     mark_event_taken(g, e->gridX, e->gridY);
     /* Defeating the guardian (modifier 8) ends the level, the same way the
        exit sign does. */
-    if ((e->klass == JJ1_CLASS_BOSS) && !g->transitionTimer) {
+    if (((e->klass == JJ1_CLASS_BOSS) ||
+         ((e->klass != JJ1_CLASS_DESTRUCT) &&
+          (jj1_event_info(g->stage, jj1_runtime_event(g->stage, e->gridX, e->gridY))->param & JJ1_PARAM_GUARDIAN)))
+        && !g->transitionTimer) {
         g->transitionTimer = 75;
         g->events |= JAZZ_EVENT_EXIT;
     }
@@ -896,6 +899,10 @@ static void spawn_grid_enemy(JazzGame *g, u8 gx, u8 gy, u8 klass, u8 strength)
     e->direction = -1;
     e->hitPoints = strength ? strength : 1;
     e->phase = (u8)((gx * 7) & 63);
+    /* bossFacing is the movement guardian's own; other enemies use it to
+       remember that they never move. */
+    e->bossFacing = (u8)(((klass != JJ1_CLASS_BOSS) &&
+        (jj1_event_info(g->stage, jj1_runtime_event(g->stage, gx, gy))->param & JJ1_PARAM_STATIONARY)) ? 2 : 0);
     if (klass == JJ1_CLASS_ENEMY_WALK) {
         /* settle onto the mask below the event cell */
         /* (pixel by pixel in effect, but probing once per 4 px mask cell
@@ -1093,7 +1100,9 @@ static void update_enemies(JazzGame *g)
         e = &g->enemies[i];
         if (!e->active) continue;
 #ifdef JAZZ_JJ1_RUNTIME
-        if (e->klass == JJ1_CLASS_ENEMY_WALK) {
+        if (e->bossFacing == 2) {
+            /* stationary: it only stands and takes hits */
+        } else if (e->klass == JJ1_CLASS_ENEMY_WALK) {
             s16 nx = e->x + e->direction;
             s16 footX = nx + ((e->direction > 0) ? (ENEMY_W - 1) : 0);
             /* Turn at walls and at ledges, like the original walkers. */
@@ -1480,7 +1489,7 @@ void jazz_step(JazzGame *g, u16 input)
         g->transitionTimer--;
         if (!g->transitionTimer) {
             u8 pend = g->bonusGem;   /* the diamond opens the bonus level */
-            if ((u8)(g->stage + 1) < JAZZ_STAGE_COUNT) build_stage(g, g->stage + 1);
+            if ((u8)(g->stage + 1) < jj1_runtime_stage_count()) build_stage(g, g->stage + 1);
             else g->finished = 1;
             g->bonusPending = pend;
         }

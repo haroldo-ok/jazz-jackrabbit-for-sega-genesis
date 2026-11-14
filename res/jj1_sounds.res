@@ -1,3 +1,4 @@
+// Lite cartridge (make lite): same resource as res/, see tools/build_lite.py.
 // Converted locally from user-supplied JJ1 shareware SOUNDS.000
 WAV jj1_fire   "jj1/fire_blaster.wav" XGM
 WAV jj1_jump   "jj1/JUMPA11.wav" PCM 11025

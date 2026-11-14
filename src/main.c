@@ -12,6 +12,7 @@
 #include "bonus_view.h"
 #include "stage_cheat.h"
 #include "jj1_scenes.h"
+#include "jj1_pack.h"
 
 #include "jj1_sfx.h"
 
@@ -34,24 +35,6 @@ static u16 playerSlotFrame;
 static u16 boardSlotKey;
 static u16 bossGunArt;
 static u16 lastInput;
-/* Which bonus level follows each stage: the bonus file belongs to the stage's
- * world (shareware: worlds 000, 001, 002 -> BONUSMAP.000/001/002). */
-#define JJ1_BONUS_FOR_000 0
-#define JJ1_BONUS_FOR_001 1
-#define JJ1_BONUS_FOR_002 2
-#define JJ1_BONUS_FOR_003 0
-#define JJ1_BONUS_FOR_004 1
-#define JJ1_BONUS_FOR_005 2
-#define JJ1_BONUS_FOR_006 0
-#define JJ1_BONUS_FOR_007 1
-#define JJ1_BONUS_FOR_008 2
-#define JJ1_BONUS_FOR_018 2
-#define STAGE(n, world, mask) JJ1_BONUS_FOR_##world
-static const u8 stageBonus[JAZZ_STAGE_COUNT] = {
-#include "jj1_episode_stages.inc"
-};
-#undef STAGE
-
 #ifdef JAZZ_PROFILE
 static u32 profT[8];
 #ifdef JAZZ_PROFDUMP
@@ -84,9 +67,6 @@ static inline u16 mul_u8(u8 a, u8 b)
 }
 
 static u16 itemSlotLoaded[JJ1_ITEM_SLOTS] = { 0xFFFF, 0xFFFF };
-static const u8 stage_has_clear_scene[JAZZ_STAGE_COUNT] = {
-#include "jj1_episode_end_scenes.inc"
-};
 
 static u16 approachedPlanet = 0xFFFF;
 static u8 selectedStage;   /* level select on the title screen */
@@ -233,6 +213,58 @@ static s16 jj1MapOriginY = -1;
 static const Jj1StageArt *stageArt;
 static const u32 *jj1ActiveBlockTiles;
 static const u8 *jj1ActiveBlocks;
+static const u16 *jj1ActiveBlockIndex;
+
+/* Sprite and player frames.  On the lite cartridge the level's tiles are a
+ * pool of distinct tiles plus an index per logical tile, so a frame is
+ * gathered tile by tile into the DMA queue's own buffer. */
+static u32 liteScratch[64 * 8];
+/* The index (tools/build_cartridge.py pack_index): u16 groups, u16 exceptions,
+ * u16 base per 16 logical tiles, u8 offset per tile (255: exception), then
+ * sorted (logical, tile) pairs. */
+static u16 lite_exception(const u16 *index, u16 logical)
+{
+    const u16 groups = index[0];
+    const u16 *exc = index + 2 + groups + (groups << 3);
+    u16 lo = 0, hi = index[1];
+    while (lo < hi) {
+        const u16 mid = (u16)((lo + hi) >> 1);
+        const u16 at = exc[mid << 1];
+        if (at == logical) return exc[(mid << 1) + 1];
+        if (at < logical) lo = (u16)(mid + 1); else hi = mid;
+    }
+    return 0;
+}
+
+static void lite_tiles(const u32 *pool, const u16 *index, u16 first, u16 vram, u16 count, TransferMethod tm)
+{
+    const u16 *base = index + 2;
+    const u8 *offset = (const u8 *)(base + index[0]);
+    while (count) {
+        u16 n = (count > 64) ? 64 : count, i;
+        u32 *dst = (tm == DMA_QUEUE) ?
+            (u32 *)DMA_allocateAndQueueDma(DMA_VRAM, vram * 32, n * 16, 2) : 0;
+        u32 *out = dst ? dst : liteScratch;
+        for (i = 0; i < n; i++) {
+            const u16 logical = (u16)(first + i);
+            const u8 o = offset[logical];
+            const u16 tile = (o != 255) ? (u16)(base[logical >> 4] + o) : lite_exception(index, logical);
+            const u32 *t = pool + ((u32)tile << 3);
+            out[0] = t[0]; out[1] = t[1]; out[2] = t[2]; out[3] = t[3];
+            out[4] = t[4]; out[5] = t[5]; out[6] = t[6]; out[7] = t[7];
+            out += 8;
+        }
+        if (!dst) VDP_loadTileData(liteScratch, vram, n, DMA);
+        first += n; vram += n; count -= n;
+    }
+}
+#define LOAD_SPRITE_TILES(first, vram, count, tm) \
+    lite_tiles(stageArt->spriteTiles, stageArt->spriteIndex, (u16)(first), (vram), (count), (tm))
+#define LOAD_PLAYER_TILES(first, vram, count, tm) \
+    lite_tiles(stageArt->playerTiles, stageArt->playerIndex, (u16)(first), (vram), (count), (tm))
+#define LOAD_BLOCK_TILES(block, vram, count, tm) \
+    lite_tiles(jj1ActiveBlockTiles, jj1ActiveBlockIndex, (u16)((block) * JJ1_BLOCK_TILE_COUNT), (vram), (count), (tm))
+
 
 /* Block uploads during scrolling are queued for vblank so the 68000 is not
  * stalled by a DMA running against the active display; the initial fill of a
@@ -289,8 +321,8 @@ static NO_INLINE u16 cache_jj1_block(u8 sourceBlock)
     if (jj1BlockCache[slot] != 0xFF) jj1BlockSlot[jj1BlockCache[slot]] = 0xFF;
     jj1BlockCache[slot] = sourceBlock;
     jj1BlockSlot[sourceBlock] = (u8)slot;
-    VDP_loadTileData(jj1ActiveBlockTiles + ((u32) sourceBlock * JJ1_BLOCK_TILE_COUNT * 8),
-        T_JJ1_BLOCK_CACHE + (slot * JJ1_BLOCK_TILE_COUNT), JJ1_BLOCK_TILE_COUNT, blockTm);
+    LOAD_BLOCK_TILES(sourceBlock, T_JJ1_BLOCK_CACHE + (slot * JJ1_BLOCK_TILE_COUNT),
+        JJ1_BLOCK_TILE_COUNT, blockTm);
     return slot;
 }
 
@@ -485,17 +517,13 @@ static void render_jj1_sky(void)
     }
 }
 
-/* One track per world: Diamondus (stages 0-2), Tubelectric (3-4), Medivo
- * (5-7), matching the stage->world grouping used for the tile banks.  The XGM
- * driver loops the track until the next call, so we only start playback when
- * the world actually changes. */
-#include "jj1_episode_music.inc"
-
+/* One track per world, from the mapped episode pack.  The XGM driver loops
+ * the track until the next call, so playback only restarts when the track
+ * actually changes. */
 static const u8 *stage_music(u8 stage)
 {
-    /* One track per world, from this episode's own world list. */
-    if (stage >= JJ1_EPISODE_STAGES) stage = 0;
-    return jj1_stage_music[stage];
+    if (stage >= JJ1_PACK_STAGES) stage = 0;
+    return JJ1_GAME_PACK->music[stage];
 }
 
 static const u8 *playingMusic;
@@ -548,7 +576,8 @@ static void render_backdrop(u8 stage)
        and event sprites. */
     stageArt = &jazz_stage_art[(stage < JAZZ_STAGE_COUNT) ? stage : 0];
     jj1ActiveBlockTiles = stageArt->blockTiles;
-    jj1ActiveBlocks = stageArt->blocks;
+    jj1ActiveBlockIndex = stageArt->blockIndex;
+    jj1ActiveBlocks = jj1_runtime_blocks(stage);
 
     PAL_setPalette(PAL2, stageArt->blockPalette, DMA);
     reset_palette_cycles();
@@ -746,10 +775,10 @@ static u8 itemSlotEvent[JJ1_ITEM_SLOTS];
  * kept across frames so a pickup that is still on screen is not re-uploaded
  * sixty times a second; 0xFFFF = unknown. */
 
-static void upload_item_slot(u8 slot, u16 key, const u32 *src, u16 tiles)
+static void upload_item_slot(u8 slot, u16 key, u16 first, u16 tiles)
 {
     if (itemSlotLoaded[slot] == key) return;
-    VDP_loadTileData(src, T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES), tiles, DMA_QUEUE);
+    LOAD_SPRITE_TILES(first, T_ITEM_BASE + (slot * JJ1_ITEM_SLOT_TILES), tiles, DMA_QUEUE);
     itemSlotLoaded[slot] = key;
 }
 
@@ -805,16 +834,14 @@ static NO_INLINE u8 event_slot(u8 id, u8 bridge)
                 slot = s;
                 itemSlotEvent[s] = id;
                 if (bridge) {
-                    upload_item_slot(s, (u16)(0x8000 | id),
-                        stageArt->spriteTiles + ((u32)art->tile * 8),
+                    upload_item_slot(s, (u16)(0x8000 | id), art->tile,
                         (u16)(art->tilesW * art->tilesH));
                 } else {
                     /* The whole cell is uploaded, so the column-major tile
                        order stays intact. */
                     u8 frame = anim_frame(art->frames);
                     upload_item_slot(s, (u16)((id << 4) | (frame & 15)),
-                        stageArt->spriteTiles +
-                        ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                        (u16)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))),
                         (u16)(art->tilesW * art->tilesH));
                 }
                 break;
@@ -920,8 +947,7 @@ static void render_sprites(void)
         u16 cellH = (u16)(art->tilesH << 3);
         u8 flip = !game.player.facing;
         if (playerSlotFrame != wanted) {
-            VDP_loadTileData(stageArt->playerTiles +
-                             ((u32)(art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+            LOAD_PLAYER_TILES((art->tile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))),
                              T_PLAYER, mul_u8(art->tilesW, art->tilesH), DMA_QUEUE);
             playerSlotFrame = wanted;
         }
@@ -935,8 +961,7 @@ static void render_sprites(void)
                 u8 frame = anim_frame(bd->frames);
                 u16 wanted = (u16)(0x200 | (game.player.facing << 4) | frame);
                 if (boardSlotKey != wanted) {
-                    VDP_loadTileData(stageArt->spriteTiles +
-                        ((u32)(bd->tile + (u16)mul_u8(frame, (u8)need)) * 8), T_BOARD, need, DMA_QUEUE);
+                    LOAD_SPRITE_TILES((bd->tile + (u16)mul_u8(frame, (u8)need)), T_BOARD, need, DMA_QUEUE);
                     boardSlotKey = wanted;
                 }
                 put_sprite(&count,
@@ -958,8 +983,7 @@ static void render_sprites(void)
                 u16 key = (u16)(0xB0 | frame);
                 u16 slot = T_ITEM_BASE + ((JJ1_ITEM_SLOTS - 1) * JJ1_ITEM_SLOT_TILES);
                 if (itemSlotEvent[JJ1_ITEM_SLOTS - 1] != key) {
-                    VDP_loadTileData(stageArt->spriteTiles +
-                        ((u32)(b->tile + (u16)mul_u8(frame, (u8)need)) * 8), slot, need, DMA_QUEUE);
+                    LOAD_SPRITE_TILES((b->tile + (u16)mul_u8(frame, (u8)need)), slot, need, DMA_QUEUE);
                     itemSlotEvent[JJ1_ITEM_SLOTS - 1] = (u8)key;
                     itemSlotLoaded[JJ1_ITEM_SLOTS - 1] = 0xFFFF;
                 }
@@ -985,7 +1009,7 @@ static void render_sprites(void)
                 u8 orbs = (game.player.shield > 4) ? 4 : game.player.shield;
                 u8 k;
                 if (itemSlotEvent[0] != 0xFE) {
-                    VDP_loadTileData(stageArt->spriteTiles + ((u32)sh->tile * 8),
+                    LOAD_SPRITE_TILES(sh->tile,
                                      slot, need, DMA_QUEUE);
                     itemSlotEvent[0] = 0xFE;
                     itemSlotLoaded[0] = 0xFFFF;
@@ -1094,8 +1118,7 @@ static void render_sprites(void)
                 u8 cx, cy;
                 if (enemySlotArt[i] != wanted) {
 #ifndef NOENEMYDMA
-                    VDP_loadTileData(stageArt->spriteTiles +
-                                     ((u32)(srcTile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))) * 8),
+                    LOAD_SPRITE_TILES((srcTile + mul_u8(frame, (u8)mul_u8(art->tilesW, art->tilesH))),
                                      slot, mul_u8(art->tilesW, art->tilesH), DMA_QUEUE);
 #endif
                     enemySlotArt[i] = wanted;
@@ -1137,8 +1160,7 @@ static void render_sprites(void)
                         s16 cellX = e->x - cameraX + (JAZZ_ENEMY_W >> 1) - (s16)(cellW >> 1);
                         s16 cellY = e->y - cameraY + JAZZ_ENEMY_H - (s16)cellH;
                         if (bossGunArt != gwant) {
-                            VDP_loadTileData(stageArt->spriteTiles +
-                                ((u32)(gun->tile + (u16)mul_u8(gframe, (u8)gunTiles)) * 8),
+                            LOAD_SPRITE_TILES((gun->tile + (u16)mul_u8(gframe, (u8)gunTiles)),
                                 gunSlot, gunTiles, DMA_QUEUE);
                             bossGunArt = gwant;
                         }
@@ -1242,7 +1264,13 @@ static void reset_sprite_slots(void)
  * life, as in the original.  The caller rebuilds the screen afterwards. */
 static int run_bonus(u8 index)
 {
-    int r = bonus_play(index, jj1_music_bonus);
+    int r;
+    /* the bonus level plays its own music */
+    XGM_stopPlay();
+    SYS_doVBlankProcess();
+    r = bonus_play(index, jj1_music_bonus);
+    XGM_stopPlay();
+    SYS_doVBlankProcess();
     playingMusic = 0;           /* the stage music must restart */
     if (r == BONUS_WON) {
         if (game.lives < 9) game.lives++;
@@ -1270,7 +1298,10 @@ static void begin_play(u8 loaded)
     load_video_assets();
     if (!loaded) {
         jazz_game_init(&game);
-        if (cheatUnlocked && selectedStage) jazz_debug_set_stage(&game, selectedStage);
+        if (cheatUnlocked && selectedStage) {
+            u8 last = (u8)(jj1_pack_stages() - 1);
+            jazz_debug_set_stage(&game, (selectedStage > last) ? last : selectedStage);
+        }
     }
     game.paused = 0;
     approachedPlanet = 0xFFFF;
@@ -1466,7 +1497,21 @@ static void restore_paused_game(void)
 
 static void select_main_menu(void)
 {
-    if (menuOption == 0) { begin_play(0); return; }
+    if (menuOption == 0) {
+        const u8 choice = jj1_play_episode_menu();
+        if (choice == 0xFF) { show_main_menu(); return; }
+        if (choice == 0xFE) {           /* bonus levels */
+            VDP_setEnable(TRUE);        /* the episode screen left it off */
+            jazz_game_init(&game);
+            run_bonus(0);
+            show_title();
+            return;
+        }
+        jj1_pack_select(choice);
+        playingMusic = 0;
+        begin_play(0);
+        return;
+    }
     if (menuOption == 5) { show_title(); return; }
     if (menuOption == 1) {
         if (slot_menu(0)) { begin_play(1); return; }
@@ -1502,7 +1547,7 @@ static void run_play_frame(u16 input)
 #endif
     PROF(0, jazz_step(&game, input));
     if (completingLevel && !game.transitionTimer && !game.paused) {
-        if (renderedStage < JAZZ_STAGE_COUNT && stage_has_clear_scene[renderedStage]) {
+        if (renderedStage < JAZZ_STAGE_COUNT && JJ1_GAME_PACK->clearScene[renderedStage]) {
             jj1_play_level_clear(jj1_music_endlevel);
             playingMusic = 0;
             load_video_assets();
@@ -1512,7 +1557,7 @@ static void run_play_frame(u16 input)
         }
     }
     if (game.bonusPending && (renderedStage < JAZZ_STAGE_COUNT)) {
-        run_bonus(stageBonus[renderedStage]);
+        run_bonus(JJ1_GAME_PACK->bonus[renderedStage]);
         game.bonusPending = 0;
         renderedStage = 0xFF;   /* force the stage to be redrawn below */
     }
@@ -1605,6 +1650,15 @@ int main(bool hardReset)
 {
     u16 pad;
     (void)hardReset;
+    /* Bring episode 1's game pack into the window before anything reads it. */
+    /* The lite program keeps the level map and event grid in RAM (32 KB), so
+       the DMA queue gets a 4 KB buffer instead of SGDK's 8 KB.  SGDK's own
+       start-up allocation did not fit; this one is made again here. */
+    DMA_initEx(0, 0xFFFF, 4096);
+    jj1_pack_select(0);
+#ifdef JAZZ_MEMPROBE
+    { u16 f = MEM_getFree(), l = MEM_getLargestFreeBlock(); SRAM_enable(); SRAM_writeWord(0, 0x4D45); SRAM_writeWord(2, f); SRAM_writeWord(4, l); SRAM_disable(); }
+#endif
 #ifdef JAZZ_AUTOTEST
     /* Boot marker: distinct from the final assertion marker below. */
     SRAM_enable();
@@ -1670,6 +1724,9 @@ int main(bool hardReset)
     load_video_assets();
     show_title();
 #elif defined(JAZZ_ENDING_TEST)
+#ifdef JAZZ_TEST_EPISODE
+    jj1_pack_select(JAZZ_TEST_EPISODE);
+#endif
     jj1_play_episode_ending(jj1_music_bonus);
     playingMusic = 0;
     load_video_assets();

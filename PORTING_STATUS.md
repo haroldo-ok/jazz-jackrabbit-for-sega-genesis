@@ -1,5 +1,8 @@
 # Porting status — work in progress
 
+
+> **Note (November 2026):** the cartridge is now the single 5 MB build described in README.md (*One cartridge, all episodes*). The 31 MB "full" cartridge was removed because it failed on most emulators; with it went the converted startup animation, credit pages, original instruction/order pages, planet approach animations, level/bonus-clear animations and the ENDE1 ending, which are now text screens. Items below that describe those scenes record what the removed version did; they are kept for history.
+
 This is not a completed shareware port. Original game data remains subject to
 its owners' rights. This project does not include the raw shareware archive.
 

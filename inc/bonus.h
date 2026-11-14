@@ -50,10 +50,21 @@ typedef struct {
     u8 gotTime;
 } BonusGame;
 
+/* Per-level settings from the BONUSMAP file. */
+typedef struct {
+    u16 seconds, items;
+    u8 startX, startY;
+    u8 type[16], passable[16], used[16], sound[16];
+} BonusMeta;
+
 s32 bonus_sin(s32 angle);
 s32 bonus_cos(s32 angle);
 void bonus_init(BonusGame *b, u8 level, const u8 *floorTiles, const u8 *masks,
                 const u8 *grid, const u8 *events);
+/* The same for a level whose settings are not among the built-in three (the
+ * episode packs carry their own). */
+void bonus_init_meta(BonusGame *b, const BonusMeta *meta, const u8 *floorTiles,
+                     const u8 *masks, const u8 *grid, const u8 *events);
 int bonus_step(BonusGame *b, u8 input);
 /* event id at a tile, 0 if none or already collected */
 u8 bonus_event(const BonusGame *b, int tx, int ty);

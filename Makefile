@@ -20,6 +20,18 @@
 #   make EXTRA_FLAGS=-DSELFTEST
 
 GDK ?= /home/claude/work/sgdk
+export GDK
+
+# The cartridge (5 MB) is the SGDK program followed by one compact pack per
+# episode and the music banks (inc/jj1_pack.h, tools/build_cartridge.py).  The
+# packs are built first, because the program carries their addresses
+# (out/lite/lite_packdir.inc) and the music's (out/lite/jj1_music.h); the ROM
+# is assembled once SGDK has produced the program.  `make` leaves it in
+# out/rom.bin and JazzJackrabbitGenesis.bin.
+#
+# The music is converted once from the game's modules and kept in
+# packs/music: the first build needs  make JAZZ_DATA=/path/to/JAZZ
+# (the shareware directory is enough for episode 1).
 
 # Must be set BEFORE the include: makefile.gen folds EXTRA_FLAGS into
 # DEFAULT_FLAGS with a simply-expanded (:=) assignment, so a later value is
@@ -30,7 +42,8 @@ GDK ?= /home/claude/work/sgdk
 # become `move.w ...,11(a0)` — a word access at an ODD address, which is an
 # address error on the 68000. Cheap insurance for every project.
 # `override ... +=` appends even when EXTRA_FLAGS comes from the command line.
-override EXTRA_FLAGS += -fno-store-merging -DJAZZ_JJ1_RUNTIME -mstrict-align -fno-tree-slp-vectorize
+override EXTRA_FLAGS += -fno-store-merging -DJAZZ_JJ1_RUNTIME -mstrict-align -fno-tree-slp-vectorize \
+    -I$(CURDIR)/out/lite
 
 include $(GDK)/makefile.gen
 
@@ -54,6 +67,17 @@ endif
 
 # rescomp creates headers as a side effect of compiling each resource. Ensure
 # they exist before compiling C files, including on parallel clean builds.
+LITE_DIR := out/lite
+.PHONY: cartridge
+out/packs/stamp:
+	python3 tools/build_packs.py packs
+$(LITE_DIR)/lite_packdir.inc: out/packs/stamp
+	python3 tools/build_cartridge.py packs $(if $(JAZZ_DATA),--input $(JAZZ_DATA))
+$(OBJS): | $(LITE_DIR)/lite_packdir.inc
+release: cartridge
+debug: cartridge
+cartridge: padROM
+	python3 tools/build_cartridge.py rom --program $(OUT_DIR)/rom.bin
 $(OUT)/src/main.o $(OUT)/src/bonus_view.o $(OUT)/src/jj1_scenes.o: \
-  $(OUT)/res/jj1_sounds.o $(OUT)/res/jj1_music.o $(OUT)/res/jj1_font.o \
-  $(OUT)/res/jj1_bonus.o $(OUT)/res/jj1_hud.o $(OUT)/res/jj1_scenes_res.o $(OUT)/res/jj1_menu_pages.o
+  $(OUT)/res/jj1_sounds.o $(OUT)/res/jj1_font.o \
+  $(OUT)/res/jj1_bonus.o $(OUT)/res/jj1_hud.o $(OUT)/res/jj1_scenes_res.o

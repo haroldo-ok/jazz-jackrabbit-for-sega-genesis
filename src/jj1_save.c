@@ -4,6 +4,7 @@
 #include <genesis.h>
 #include "jj1_save.h"
 #include "jj1_options.h"
+#include "jj1_pack.h"
 
 #define SLOT_BASE 256UL
 #define SLOT_SIZE 6144UL
@@ -23,7 +24,14 @@ static u8 valid_mapped(u8 slot)
     for (i = 0; i < sizeof(JazzGame); i++) sum = checksum_add(sum, SRAM_readByte(b+HEADER_SIZE+i));
     if (SRAM_readByte(b+5) != (sum >> 8) || SRAM_readByte(b+6) != (sum & 255)) return 0;
     if (SRAM_readByte(b+HEADER_SIZE+__builtin_offsetof(JazzGame, stage)) >= JAZZ_STAGE_COUNT) return 0;
+    if (SRAM_readByte(b+7) >= jj1_pack_count) return 0;   /* the slot's episode */
     return 1;
+}
+/* Episode of a valid slot (for the menu). */
+u8 jj1_save_episode(u8 slot)
+{
+    u8 e; if (slot >= JJ1_SAVE_SLOTS) return 0;
+    begin_sram(); e = SRAM_readByte(base_for(slot)+7); end_sram(); return e;
 }
 u8 jj1_save_valid(u8 slot)
 {
@@ -38,6 +46,7 @@ u8 jj1_save_write(u8 slot, const JazzGame *game)
     SRAM_writeByte(b, 0); SRAM_writeByte(b+1, 0);
     SRAM_writeByte(b+2, 1); SRAM_writeByte(b+3, sizeof(JazzGame) >> 8);
     SRAM_writeByte(b+4, sizeof(JazzGame) & 255);
+    SRAM_writeByte(b+7, jj1_episode);
     for (i = 0; i < sizeof(JazzGame); i++) { u8 c=bytes[i]; SRAM_writeByte(b+HEADER_SIZE+i, c); sum=checksum_add(sum,c); }
     SRAM_writeByte(b+5, sum >> 8); SRAM_writeByte(b+6, sum & 255);
     SRAM_writeByte(b+1, 'S'); SRAM_writeByte(b, 'J');
@@ -49,7 +58,11 @@ u8 jj1_save_read(u8 slot, JazzGame *game)
     if (slot >= JJ1_SAVE_SLOTS) return 0;
     b=base_for(slot); begin_sram(); valid=valid_mapped(slot);
     if (valid) for(i=0;i<sizeof(JazzGame);i++) bytes[i]=SRAM_readByte(b+HEADER_SIZE+i);
-    end_sram(); return valid;
+    if (valid) i = SRAM_readByte(b+7);
+    end_sram();
+    /* a saved game belongs to its episode: bring that episode's pack in */
+    if (valid) jj1_pack_select((u8)i);
+    return valid;
 }
 /* Separate small checksummed settings record; bytes 0-15 reserved for tests. */
 void jj1_options_save(void)

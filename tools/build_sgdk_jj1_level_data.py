@@ -198,6 +198,16 @@ def classify_event(record: bytes, has_anim: bool = True) -> tuple[int, int, int,
         return CLASS_UNBOARD, 0, 0, 0
     if modifier == 6:
         return CLASS_ONEWAY, 0, 0, 0
+    # The other episodes' guardians are ordinary events (JJ1StandardEvent in
+    # OpenJazz) with modifier 8 and many hit points: destroying one ends the
+    # level.  They become enemies flagged with param bit 7 (GUARDIAN), so that
+    # touching them hurts instead of finishing the level.  Modifier 8 with
+    # little or no strength stays an end sign.
+    if modifier == 8 and strength > 1:
+        flying = movement in (6, 7, 25)
+        # movement 0 does not move at all (param bit 6: STATIONARY)
+        return ((CLASS_ENEMY_FLY if flying else CLASS_ENEMY_WALK), 0x80 | (0x40 if movement == 0 else 0),
+                min(points * 10 // 25, 255), min(strength, 255))
     if modifier in (8, 27, 41):          # boss / end of level / bonus level
         return CLASS_END, 0, 0, 0
     if modifier == 29:                   # upward spring: rises |magnitude| * 21 px

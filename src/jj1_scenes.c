@@ -7,8 +7,9 @@
 #include "jj1_scenes.h"
 #include "jazz_gfx.h"
 #include "jj1_scenes_res.h"
-#include "jj1_menu_pages.h"
 #include "jj1_episode.h"
+#include "jj1_scene_types.h"
+#include "jj1_pack.h"
 
 #define SCENE_W 40
 #define SCENE_H 25
@@ -16,19 +17,8 @@
 #define SCENE_TILE_BASE TILE_USER_INDEX
 #define SCENE_FRAME_BYTES (SCENE_TILES * 32UL)
 
-typedef struct { u16 start, count; } SceneRun;
-typedef struct { const SceneRun *runs; u16 count; u32 forward, backward; } SceneDelta;
-typedef struct { const SceneRun *runs; u16 count; u32 offset; u8 sound; } SparseDelta;
-typedef struct { const u8 *frames; const u16 *palette; const SceneDelta *deltas; u8 frameCount; u8 reverse; } SceneData;
-typedef struct { u16 id; const u8 *frames; const u16 *palette; const SparseDelta *deltas; } PlanetScene;
-typedef struct { const u8 *compressed[4]; const u16 *palette; } MenuPage;
-#include "jj1_menu_pages.inc"
-#include "jj1_scene_data.inc"
-#include "jj1_planet_data.inc"
-#include "jj1_ending_data.inc"
-static const PlanetScene *const stage_planets[JJ1_EPISODE_STAGES] = {
-#include "jj1_episode_planets.inc"
-};
+/* The lite cartridge keeps only the title and the menu pictures. */
+#include "jj1_title_palettes.inc"
 
 typedef char scene_tiles_fit[((SCENE_TILE_BASE + SCENE_TILES) <= JJ1_VRAM_TILE_LIMIT) ? 1 : -1];
 
@@ -55,236 +45,103 @@ static void scene_setup(const u8 *frame, const u16 *palette)
     VDP_setEnable(TRUE);
 }
 
-static void scene_play(const SceneData *s, const u8 *music)
+/* Lite cartridge: the cutscenes become short text screens. */
+static void text_screen(const char *const *lines, u8 count, u16 seconds, const u8 *music, u8 sound)
 {
-    u16 frames = 0;
     const u16 refresh = SYS_isPAL() ? 50 : 60;
-    u16 previous = JOY_readJoypad(JOY_1);
-    u8 current = 0, forward = 1, tick = 0;
-    const u8 *data = s->frames;
+    u16 previous = JOY_readJoypad(JOY_1), t;
+    u8 i;
+    static const u16 pal[16] = { 0x000, 0xEEE, 0x0CE, 0x0AE, 0x08C, 0x06A, 0x048, 0x026,
+                                 0x2E2, 0x0A0, 0x060, 0xE80, 0xA40, 0x620, 0x888, 0x444 };
+    (void)sound;
     XGM_stopPlay();
-    scene_setup(data, s->palette);
+    scene_setup(0, pal);
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_setTextPlane(BG_A); VDP_setTextPalette(PAL0);
+    for (i = 0; i < count; i++) {
+        const char *l = lines[i];
+        u16 n = 0;
+        while (l[n]) n++;
+        VDP_drawText(l, (u16)((40 - n) >> 1), (u16)(12 - count + i * 2));
+    }
     if (music) jj1_music_start(music);
-
-    /* The .0SC scripts specify six seconds at 14 frames per second. RR in
-     * both files requests a reverse animation: play the same decoded frames
-     * backwards, avoiding duplicated turn-around frames. */
-    while (frames < (u16)(refresh * 6)) {
+    for (t = 0; !seconds || t < seconds * refresh; t++) {
         u16 pad = JOY_readJoypad(JOY_1);
-        if ((pad & ~previous) & BUTTON_START) break;
+        if ((pad & ~previous) & (BUTTON_START | BUTTON_A | BUTTON_C)) break;
         previous = pad;
-        tick += 14;
-        if (tick >= refresh) {
-            u8 next;
-            const SceneDelta *delta;
-            u16 i;
-            tick -= refresh;
-            if (forward && current + 1 >= s->frameCount) forward = 0;
-            else if (!forward && current == 0) forward = 1;
-            next = forward ? (u8)(current + 1) : (u8)(current - 1);
-            delta = &s->deltas[forward ? current : next];
-            data = s->frames + (forward ? delta->forward : delta->backward);
-            for (i = 0; i < delta->count; i++) {
-                const SceneRun *r = &delta->runs[i];
-                VDP_loadTileData((const u32 *)data, SCENE_TILE_BASE + r->start, r->count, DMA);
-                data += (u32)r->count * 32;
-            }
-            current = next;
-        }
         SYS_doVBlankProcess();
-        frames++;
     }
     XGM_stopPlay();
+    VDP_clearPlane(BG_A, TRUE);
 }
 
-
-/* INSTRUCT.0SC and ORDER.0SC pages are pre-composited from their original
- * scripts. The viewer decompresses one page at a time to preserve RAM and ROM. */
 void jj1_play_info_pages(unsigned char order)
 {
-    const MenuPage *pages = order ? order_pages : instruct_pages;
-    const u8 count = order ? (sizeof(order_pages) / sizeof(order_pages[0])) :
-                             (sizeof(instruct_pages) / sizeof(instruct_pages[0]));
-    u16 previous = JOY_readJoypad(JOY_1);
-    u8 index = 0, redraw = 1;
-    u8 *infoPageBuffer;
-    /* Pages are four independently compressed 250-tile strips. */
-    infoPageBuffer = MEM_alloc(8000);
-    if (!infoPageBuffer) return;
-    while (TRUE) {
-        u16 pad, pressed;
-        if (redraw) {
-            u8 part;
-            scene_setup(0, pages[index].palette);
-            VDP_setEnable(FALSE);
-            for (part = 0; part < 4; part++) {
-                lz4w_unpack(pages[index].compressed[part], infoPageBuffer);
-                VDP_loadTileData((const u32 *)infoPageBuffer, SCENE_TILE_BASE + part * 250, 250, DMA);
-            }
-            VDP_setEnable(TRUE);
-            /* Keep the original DOS footer but supply actual pad controls. */
-            VDP_setWindowOnBottom(1);
-            VDP_setTextPlane(WINDOW); VDP_setTextPalette(PAL0);
-            VDP_drawTextBG(WINDOW, "B/C BACK  A/START/RIGHT NEXT", 5, 27);
-            redraw = 0;
-        }
-        SYS_doVBlankProcess();
-        pad = JOY_readJoypad(JOY_1);
-        pressed = pad & ~previous;
-        previous = pad;
-        if (pressed & (BUTTON_B | BUTTON_C)) break;
-        if (pressed & (BUTTON_RIGHT | BUTTON_DOWN | BUTTON_START | BUTTON_A)) {
-            if (index + 1 >= count) break;
-            index++; redraw = 1;
-        } else if ((pressed & (BUTTON_LEFT | BUTTON_UP)) && index) {
-            index--; redraw = 1;
-        }
-    }
-    MEM_free(infoPageBuffer);
+    static const char *const help[] = {
+        "JAZZ JACKRABBIT",
+        "LEFT/RIGHT  WALK, HOLD TO RUN",
+        "B  JUMP     A  FIRE",
+        "C  CHANGE WEAPON",
+        "DOWN  CROUCH    START  PAUSE",
+        "FIND THE EXIT SIGN, BEAT THE GUARDIAN",
+    };
+    static const char *const order_[] = {
+        "THIS CARTRIDGE HOLDS EVERY EPISODE",
+        "IT WAS BUILT WITH, IN 5 MB.",
+        "EPISODES 2-9 AND HOLIDAY HARE COME",
+        "FROM THE REGISTERED / CD GAME.",
+    };
+    if (order) text_screen(order_, 4, 0, 0, 0);
+    else text_screen(help, 6, 0, 0, 0);
 }
 
-/* The original waits two seconds at double size after the approach, then
- * zooms in rapidly for a quarter second. Frames are sparse ROM tile deltas;
- * no framebuffer or temporary 32 KB RAM allocation is required. */
 unsigned short jj1_play_planet(unsigned char stage, unsigned short previous)
 {
-    const PlanetScene *planet;
-    u16 tick, previousPad;
-    const u16 refresh = SYS_isPAL() ? 50 : 60;
-    u8 current = 0;
-    if (stage >= JJ1_EPISODE_STAGES) return previous;
-    planet = stage_planets[stage];
-    if (!planet || planet->id == previous) return previous;
-    XGM_stopPlay();
-    scene_setup(planet->frames, planet->palette);
-    previousPad = JOY_readJoypad(JOY_1);
-    for (tick = 0; tick < (u16)(refresh * 4 + refresh / 4); tick++) {
-        u16 pad = JOY_readJoypad(JOY_1);
-        u8 target;
-        if ((pad & ~previousPad) & (BUTTON_START | BUTTON_B)) break;
-        previousPad = pad;
-        if (tick < refresh * 2) target = (u8)((tick * 10) / refresh);
-        else if (tick < refresh * 4) target = 19;
-        else {
-            target = (u8)(20 + ((tick - refresh * 4) * 16) / refresh);
-            if (target > 23) target = 23;
-        }
-        while (current < target) {
-            const SparseDelta *d = &planet->deltas[current];
-            const u8 *pixels = planet->frames + d->offset;
-            u16 i;
-            for (i = 0; i < d->count; i++) {
-                const SceneRun *run = &d->runs[i];
-                VDP_loadTileData((const u32 *)pixels, SCENE_TILE_BASE + run->start,
-                                 run->count, DMA);
-                pixels += (u32)run->count * 32;
-            }
-            current++;
-        }
-        SYS_doVBlankProcess();
+    char name[24];
+    const char *lines[3];
+    const char *w;
+    u8 index, i, n;
+    if (stage >= JJ1_PACK_STAGES) return previous;
+    index = JJ1_GAME_PACK->planet[stage];
+    if (index == 0xFF) return previous;
+    if ((u16)(index + 1 + (jj1_episode << 4)) == previous) return previous;
+    /* the n-th word of the episode's world list; past the end: the guardian */
+    w = jj1_pack_dir[jj1_episode].worlds;
+    for (i = 0; i < index && *w; i++) {
+        while (*w && *w != ' ') w++;
+        while (*w == ' ') w++;
     }
-    return planet->id;
-}
-
-/* ENDE1's first, second and fourth pages wait for the player; the third
- * runs its original animation once at 14 fps. START/A advances each page. */
-static void ending_wait(void)
-{
-    u16 previous = JOY_readJoypad(JOY_1);
-    while (TRUE) {
-        u16 pad = JOY_readJoypad(JOY_1);
-        if ((pad & ~previous) & (BUTTON_START | BUTTON_A | BUTTON_C | BUTTON_RIGHT)) return;
-        previous = pad;
-        SYS_doVBlankProcess();
-    }
+    if (*w) { for (n = 0; w[n] && w[n] != ' ' && n < 23; n++) name[n] = w[n]; name[n] = 0; }
+    else { const char *g = "THE GUARDIAN"; for (n = 0; g[n]; n++) name[n] = g[n]; name[n] = 0; }
+    lines[0] = "NOW APPROACHING"; lines[1] = ""; lines[2] = name;
+    text_screen(lines, 3, 2, 0, 0);
+    return (u16)(index + 1 + (jj1_episode << 4));
 }
 
 void jj1_play_episode_ending(const unsigned char *music)
 {
-    u16 previous;
-    u8 frame = 0, tick = 0;
-    const u16 refresh = SYS_isPAL() ? 50 : 60;
-    XGM_stopPlay();
-    scene_setup(jj1_scene_ending_page_0, ending_page_0_pal);
-    if (music) jj1_music_start(music);
-    ending_wait();
-    scene_setup(jj1_scene_ending_page_1, ending_page_1_pal);
-    ending_wait();
-    scene_setup(jj1_scene_ending_animation, ending_animation_pal);
-    previous = JOY_readJoypad(JOY_1);
-    while (frame < (sizeof(ending_animation_deltas) / sizeof(ending_animation_deltas[0]))) {
-        u16 pad = JOY_readJoypad(JOY_1);
-        if ((pad & ~previous) & (BUTTON_START | BUTTON_A | BUTTON_C | BUTTON_RIGHT)) break;
-        previous = pad;
-        tick += 14;
-        if (tick >= refresh) {
-            const SparseDelta *d = &ending_animation_deltas[frame++];
-            const u8 *pixels = jj1_scene_ending_animation + d->offset;
-            u16 i;
-            tick -= refresh;
-            for (i = 0; i < d->count; i++) {
-                const SceneRun *run = &d->runs[i];
-                VDP_loadTileData((const u32 *)pixels, SCENE_TILE_BASE + run->start, run->count, DMA);
-                pixels += (u32)run->count * 32;
-            }
-        }
-        SYS_doVBlankProcess();
-    }
-    scene_setup(jj1_scene_ending_page_3, ending_page_3_pal);
-    ending_wait();
-    XGM_stopPlay();
+    const char *lines[4];
+    lines[0] = "CONGRATULATIONS!";
+    lines[1] = "";
+    lines[2] = jj1_pack_dir[jj1_episode].title;
+    lines[3] = "IS COMPLETE";
+    text_screen(lines, 4, 0, music, 0);
 }
 
-void jj1_play_level_clear(const unsigned char *music) { scene_play(&level_clear_scene, music); }
-void jj1_play_bonus_clear(const unsigned char *music) { scene_play(&bonus_clear_scene, music); }
-
-/* Sparse startup data stores only the tiles changed by each original frame. */
-void jj1_play_startup(void)
+void jj1_play_level_clear(const unsigned char *music)
 {
-    u16 previous = JOY_readJoypad(JOY_1), elapsed = 0;
-    const u16 refresh = SYS_isPAL() ? 50 : 60;
-    u8 frame = 0, tick = 0, page;
-    XGM_stopPlay();
-    scene_setup(jj1_scene_startup, startup_pal);
-    while (frame < sizeof(startup_deltas) / sizeof(startup_deltas[0])) {
-        u16 pad = JOY_readJoypad(JOY_1);
-        const SparseDelta *d;
-        const u8 *pixels;
-        u16 i;
-        if ((pad & ~previous) & BUTTON_START) return;
-        previous = pad;
-        tick += 14;
-        if (tick >= refresh) {
-            tick -= refresh;
-            d = &startup_deltas[frame++];
-            pixels = jj1_scene_startup + d->offset;
-            for (i = 0; i < d->count; i++) {
-                const SceneRun *r = &d->runs[i];
-                VDP_loadTileData((const u32 *)pixels, SCENE_TILE_BASE + r->start, r->count, DMA);
-                pixels += (u32)r->count * 32;
-            }
-            /* The .0SC sound list is JUMPA11, BLOCK3, YEAHOO. These IDs
-             * are registered by load_video_assets() before startup begins. */
-            if (d->sound) {
-                u8 id = d->sound == 1 ? 65 : d->sound == 2 ? 78 : 70;
-                jj1_sfx_start(id, 2, SOUND_PCM_CH3);
-            }
-        }
-        SYS_doVBlankProcess();
-    }
-    /* Both following pages are scripted for three seconds and use the
-     * original FONTMN2 glyphs, layout, and palette. */
-    for (page = 0; page < 2; page++) {
-        scene_setup(jj1_scene_startup_credits + (u32)page * SCENE_FRAME_BYTES,
-                    startup_credits_pal);
-        for (elapsed = 0; elapsed < refresh * 3; elapsed++) {
-            u16 pad = JOY_readJoypad(JOY_1);
-            if ((pad & ~previous) & BUTTON_START) return;
-            previous = pad;
-            SYS_doVBlankProcess();
-        }
-    }
+    static const char *const l[] = { "LEVEL COMPLETE" };
+    text_screen(l, 1, 4, music, 0);
 }
+
+void jj1_play_bonus_clear(const unsigned char *music)
+{
+    static const char *const l[] = { "BONUS LEVEL COMPLETE" };
+    text_screen(l, 1, 4, music, 0);
+}
+
+void jj1_play_startup(void) { }
+
 
 void jj1_show_original_title(void)
 {
@@ -321,3 +178,128 @@ void jj1_show_original_menu(unsigned char option)
     jj1_set_menu_option(option);
     VDP_setEnable(TRUE);
 }
+
+/* ------------------------------------------------------------------------
+ * The episode-selection screen, laid out as in the original game: the list
+ * on the left (selected row black on white, episodes this cartridge does
+ * not carry in red), the episode's picture on the right.  The pictures and
+ * text come from the game's MENU.000 and FONTMN2.0FN
+ * (tools/build_episode_menu.py writes packs/menu/episode_menu.inc); without
+ * them the screen is skipped.
+ * ------------------------------------------------------------------------ */
+#if __has_include("../packs/menu/episode_menu.inc")
+#include "../packs/menu/episode_menu.inc"
+#include "jj1_runtime.h"
+
+#define EP_BASE (TILE_USER_INDEX)
+#define EP_PIC  (EP_BASE + EPMENU_BASE_TILES)
+#define EP_HIGH (EP_PIC + EPMENU_PIC_W * EPMENU_PIC_H)
+#define EP_MISS (EP_HIGH + 40)
+
+static s8 ep_pack_of_row(u8 row)
+{
+    u8 i;
+    for (i = 0; i < jj1_pack_count; i++)
+        if (jj1_pack_dir[i].number == row + 1) return (s8)i;
+    return -1;
+}
+
+static void ep_unpack(const u8 *packed, u16 vram, u16 tiles, u8 *buf)
+{
+    aplib_unpack((u8 *)packed, buf);
+    VDP_loadTileData((const u32 *)buf, vram, tiles, DMA);
+}
+
+/* state 0: as in the base screen, 1: highlighted, 2: not on the cartridge */
+static void ep_row(u8 row, u8 state, u8 missSlot)
+{
+    u8 x, y;
+    for (y = 0; y < 2; y++)
+        for (x = 0; x < 20; x++) {
+            const u16 sy = (u16)(2 + row * 2 + y), sx = (u16)(1 + x);
+            u16 tile;
+            if (state == 1) tile = (u16)(EP_HIGH + y * 20 + x);
+            else if (state == 2) tile = (u16)(EP_MISS + missSlot * 40 + y * 20 + x);
+            else tile = (u16)(EP_BASE + epmenu_base_map[sy * 40 + sx]);
+            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, tile), sx, sy);
+        }
+}
+
+static void ep_picture(u8 row, u8 available, u8 *buf)
+{
+    u16 pal[32], i, x, y;
+    const u8 *attr = epmenu_pic_attr[row];
+    if (row >= EPMENU_PICTURES) return;
+    for (i = 0; i < 32; i++) {
+        u16 c = epmenu_pic_pal[row][i];
+        if (!available) {
+            /* the original shows missing episodes in grey */
+            u16 r = (c >> 1) & 7, g = (c >> 5) & 7, b = (c >> 9) & 7;
+            u16 v = (u16)((r + g * 2 + b) >> 2);
+            c = (u16)((v << 9) | (v << 5) | (v << 1));
+        }
+        pal[i] = c;
+    }
+    ep_unpack(epmenu_pic[row], EP_PIC, EPMENU_PIC_W * EPMENU_PIC_H, buf);
+    PAL_setColors(32, pal, 32, CPU);   /* pal is on the stack: not queued */
+    for (y = 0; y < EPMENU_PIC_H; y++)
+        for (x = 0; x < EPMENU_PIC_W; x++)
+            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL2 + attr[y * EPMENU_PIC_W + x], FALSE, FALSE, FALSE,
+                             EP_PIC + y * EPMENU_PIC_W + x), EPMENU_PIC_COL + x, EPMENU_PIC_ROW + y);
+}
+
+unsigned char jj1_play_episode_menu(void)
+{
+    u8 *buf;
+    u8 row, missSlot[EPMENU_ROWS], misses = 0, i, result;
+    u16 previous, cell;
+    buf = jj1_runtime_scratch();
+    scene_setup(0, epmenu_text_pal);
+    VDP_setEnable(FALSE);
+    VDP_clearPlane(BG_A, TRUE);
+    ep_unpack(epmenu_base_tiles, EP_BASE, EPMENU_BASE_TILES, buf);
+    for (cell = 0; cell < 28 * 40; cell++)
+        VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL1, FALSE, FALSE, FALSE, EP_BASE + epmenu_base_map[cell]),
+                         cell % 40, cell / 40);
+    for (i = 0; i < EPMENU_ROWS; i++) {
+        missSlot[i] = 0xFF;
+        if (i < EPMENU_ROWS - 1 && ep_pack_of_row(i) < 0) {
+            missSlot[i] = misses;
+            ep_unpack(epmenu_strip[EPMENU_ROWS + i], EP_MISS + misses * 40, 40, buf);
+            ep_row(i, 2, misses);
+            misses++;
+        }
+    }
+    row = (u8)(jj1_pack_dir[jj1_episode].number - 1);
+    if (row >= EPMENU_ROWS) row = 0;
+    ep_unpack(epmenu_strip[row], EP_HIGH, 40, buf);
+    ep_row(row, 1, 0);
+    ep_picture(row, missSlot[row] == 0xFF, buf);
+    VDP_setEnable(TRUE);
+    previous = JOY_readJoypad(JOY_1);
+    while (TRUE) {
+        u16 pad, pressed;
+        SYS_doVBlankProcess();
+        pad = JOY_readJoypad(JOY_1);
+        pressed = pad & ~previous;
+        previous = pad;
+        if (pressed & (BUTTON_B | BUTTON_C)) { result = 0xFF; break; }
+        if (pressed & (BUTTON_A | BUTTON_START)) {
+            if (row == EPMENU_ROWS - 1) { result = 0xFE; break; }        /* bonus levels */
+            if (missSlot[row] == 0xFF) { result = (u8)ep_pack_of_row(row); break; }
+        }
+        if (pressed & (BUTTON_UP | BUTTON_DOWN)) {
+            ep_row(row, missSlot[row] == 0xFF ? 0 : 2, missSlot[row]);
+            row = (u8)((pressed & BUTTON_UP) ? (row + EPMENU_ROWS - 1) % EPMENU_ROWS : (row + 1) % EPMENU_ROWS);
+            ep_unpack(epmenu_strip[row], EP_HIGH, 40, buf);
+            ep_row(row, 1, 0);
+            ep_picture(row, missSlot[row] == 0xFF, buf);
+        }
+    }
+    VDP_setEnable(FALSE);
+    VDP_clearPlane(BG_A, TRUE);
+    return result;
+}
+#else
+unsigned char jj1_play_episode_menu(void) { return jj1_episode; }
+#endif

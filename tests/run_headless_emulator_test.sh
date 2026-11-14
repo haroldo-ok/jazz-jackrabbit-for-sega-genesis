@@ -55,7 +55,7 @@ esac
 
 # 5. Scripted playthrough of the release ROM: title -> START -> run right.
 "$TMP/libretro_harness" "$CORE" "$TMP/release.bin" 900 \
-  "65-80:start,120-150:start,190-220:start,290-295:start,360-850:right,570-574:b,shot@110,shot@340,shot@356,shot@860" \
+  "120-150:start,190-220:start,290-295:start,360-850:right,570-574:b,shot@110,shot@340,shot@356,shot@860" \
   "$ART/headless_" > "$TMP/headless_release.out"
 cat "$TMP/headless_release.out"
 
@@ -110,7 +110,7 @@ PY
 #    never audio, which is enough to catch a silent-music regression such as a
 #    bad VGM conversion, a missing resource, or a stalled Z80 driver.
 AUDIO_OUT="$("$TMP/libretro_harness" "$CORE" "$TMP/release.bin" 700 \
-  "65-80:start,audio@110,120-150:start,190-220:start,290-295:start,audio@650" "$ART/headless_audio_")"
+  "audio@110,120-150:start,190-220:start,290-295:start,audio@650" "$ART/headless_audio_")"
 echo "$AUDIO_OUT" | grep '^AUDIO' || true
 
 python3 - <<PY
@@ -136,7 +136,7 @@ GPGX_CORE="$CORE" GPGX_HARNESS="$TMP/libretro_harness" ROM="$TMP/release.bin" \
   bash "$ROOT/tests/run_menu_emulator_test.sh"
 
 # Shared pad script: skip intro, unlock selection, select BONUS 2, start.
-BSCRIPT="65-80:start,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
+BSCRIPT="130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
 for i in 0 1 2 3 4 5 6 7; do a=$((260 + i * 10)); BSCRIPT="$BSCRIPT,$a-$((a + 5)):up"; done
 BSCRIPT="$BSCRIPT,360-390:start,430-460:start,720-1200:up,720-1200:a"
 
@@ -148,7 +148,7 @@ PATH="$GDK/bin:$PATH" make -C "$ROOT" release GDK="$GDK" PREFIX="$PREFIX" \
   EXTRA_FLAGS="-DBONUS_DEBUG_X=21 -DBONUS_DEBUG_Y=2" >/dev/null
 cp "$ROOT/out/rom.bin" "$TMP/bonusdbg.bin"
 PATH="$GDK/bin:$PATH" make -C "$ROOT" clean GDK="$GDK" PREFIX="$PREFIX" >/dev/null
-IS="65-80:start,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
+IS="130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
 for i in 0 1 2 3 4 5 6; do a=$((260 + i * 10)); IS="$IS,$a-$((a + 5)):up"; done
 "$TMP/libretro_harness" "$CORE" "$TMP/bonusdbg.bin" 850 "$IS,360-390:start,430-460:start,shot@700" "$ART/items_" > "$TMP/items.out"
 python3 - "$ART" <<'PY'
@@ -200,7 +200,7 @@ PATH="$GDK/bin:$PATH" make -C "$ROOT" release GDK="$GDK" PREFIX="$PREFIX" \
 cp "$ROOT/out/rom.bin" "$TMP/mapcheck.bin"
 PATH="$GDK/bin:$PATH" make -C "$ROOT" clean GDK="$GDK" PREFIX="$PREFIX" >/dev/null
 for st in 0 3; do
-  MS="65-80:start,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
+  MS="130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a"
   for ((i = 0; i < st; i++)); do a=$((260 + i * 10)); MS="$MS,$a-$((a + 5)):up"; done
   SRAM_LINE="$("$TMP/libretro_harness" "$CORE" "$TMP/mapcheck.bin" 6000 \
     "$MS,360-390:start,430-460:start,shot@5990" "$ART/mapcheck${st}_" | tail -n 1)"

@@ -8,7 +8,7 @@ HARNESS="${GPGX_HARNESS:?Set GPGX_HARNESS to the compiled libretro_harness}"
 ROM="${ROM:-$ROOT/JazzJackrabbitGenesis.bin}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 "$HARNESS" "$CORE" "$ROM" 1050 \
- '65-80:start,shot@100,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a,shot@250,260-265:up,270-275:up,280-285:up,290-295:up,300-305:up,310-315:up,320-325:up,shot@345,360-390:start,430-460:start,shot@700,720-850:up,shot@800,shot@815'  "$TMP/frame_" > "$TMP/log" 2>&1
+ 'shot@100,130-135:up,140-145:up,150-155:down,160-165:down,170-175:left,180-185:right,190-195:left,200-205:right,210-215:b,220-225:a,shot@250,260-265:up,270-275:up,280-285:up,290-295:up,300-305:up,310-315:up,320-325:up,shot@345,360-390:start,430-460:start,shot@700,720-850:up,shot@800,shot@815'  "$TMP/frame_" > "$TMP/log" 2>&1
 python3 - "$TMP" <<'PY'
 import sys
 from PIL import Image, ImageChops

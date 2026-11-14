@@ -1,5 +1,17 @@
 #include "jj1_events.h"
 
+#ifndef JAZZ_HOST
+/* On the cartridge each stage's records are in the mapped episode pack. */
+#include "jj1_pack.h"
+const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
+{
+    static const Jj1EventInfo none = { JJ1_CLASS_NONE, 0, 0, 0, 0 };
+    if (id >= 128) return &none;
+    if (stage >= JJ1_PACK_STAGES) stage = 0;
+    return &JJ1_GAME_PACK->eventset[stage][id];
+}
+#else
+
 /* If the importer has produced ground-truth event-set includes, use them.
  * Each generated include defines jj1_levelN_eventset[64] built from the
  * original level records, replacing the provisional tables below. */
@@ -146,3 +158,4 @@ const Jj1EventInfo *jj1_event_info(u8 stage, u8 id)
 }
 
 #endif
+#endif /* JAZZ_HOST */

@@ -20,10 +20,11 @@ typedef struct {
 #define JJ1_LEVEL(n) { jj1_level##n##_blocks, jj1_level##n##_masks, \
                        jj1_level##n##_events, 0, 0 }
 
+#ifdef JAZZ_HOST
 static Jj1LevelData jj1_level_data(u8 stage)
 {
     Jj1LevelData d;
-    /* One case per stage, generated for the episode this ROM was built for. */
+    /* One case per stage, generated for the episode the tests are built on. */
     switch (stage) {
 #include "jj1_episode_leveldata.inc"
     default:
@@ -33,6 +34,31 @@ static Jj1LevelData jj1_level_data(u8 stage)
     }
     return d;
 }
+u8 jj1_runtime_stage_count(void) { return JAZZ_STAGE_COUNT; }
+#else
+/* On the cartridge the levels come from the episode pack mapped at $200000. */
+#include "jj1_pack.h"
+/* Lite cartridge: the map and event grid are aPLib-packed and unpacked into
+ * RAM when the stage starts.  The rest of the program reads them through the
+ * same pointers as on the full cartridge. */
+static u8 liteMap[256 * 64];
+static u8 liteEvents[256 * 64];
+static Jj1LevelData jj1_level_data(u8 stage)
+{
+    const Jj1PackLevel *src = &JJ1_GAME_PACK->level[(stage < JJ1_PACK_STAGES) ? stage : 0];
+    Jj1LevelData d;
+    aplib_unpack((u8 *)src->blocks, liteMap);
+    aplib_unpack((u8 *)src->events, liteEvents);
+    d.blocks = liteMap; d.masks = src->masks; d.events = liteEvents;
+    d.startX = src->startX; d.startY = src->startY;
+    return d;
+}
+u8 jj1_runtime_stage_count(void) { return JJ1_GAME_PACK->stages; }
+#endif
+
+/* Forget the cached stage: another episode's pack is about to be mapped, and
+ * its stage numbers are the same. */
+void jj1_runtime_invalidate(void);
 
 /* The queries below run dozens of times per frame (every collision probe and
  * every cell of the visible event window), so the per-stage data is resolved
@@ -54,6 +80,12 @@ static struct {
 } L = { .stage = 0xFF };
 
 static Jj1Fast F = { 0, 0, 0, 0, 0, 0xFF, 0 };
+
+void jj1_runtime_invalidate(void) { L.stage = 0xFF; F.stage = 0xFF; }
+#ifndef JAZZ_HOST
+/* The 32 KB is free outside a level: the menus may borrow it. */
+u8 *jj1_runtime_scratch(void) { L.stage = 0xFF; F.stage = 0xFF; return liteMap; }
+#endif
 
 static const Jj1LevelData *lvl(u8 stage)
 {
@@ -109,6 +141,11 @@ static u8 cell_klass(u8 stage, s16 blockX, s16 blockY)
 const u8 *jj1_runtime_events(u8 stage)
 {
     return lvl(stage)->events;
+}
+
+const u8 *jj1_runtime_blocks(u8 stage)
+{
+    return lvl(stage)->blocks;
 }
 
 const Jj1Fast *jj1_runtime_fast(u8 stage)

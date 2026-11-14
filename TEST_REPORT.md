@@ -328,3 +328,60 @@ Bonus-level floor check: with the game stepped a fixed amount and the same held 
 - 63 fixed-pace autopilot screenshots (9 per stage) pixel-identical to the previous build plus the vblank-scroll change.
 - Missed frames over 1440 autopilot iterations, stages 0-6: before 87/47/26/52/39/2/0, after 11/3/0/5/4/0/0.
 - On 8 frames of the stage 0 run (respawn pans) the vblank DMA queue exceeds about 7.2 KB, so on real hardware those transfers would run into the visible frame. Not tested on real hardware.
+
+## All episodes (SSF2 packs) — what was checked
+
+Cartridge: 31.0 MB, 10 episodes (1-9 and Holiday Hare), 66 stages, built from the CD data (`JAZZ/`).
+
+- **Host suite** (`tests/run_host_tests.sh`, `JJ1_DATA` = shareware install): all pass. Episode 1's data, planet screens, ending pages and bonus maps now live in `packs/ep1` and regenerate byte-for-byte.
+- **Headless emulator suite** (`tests/run_headless_emulator_test.sh`): all pass with the pack-based cartridge — on-target self-test, scripted playthrough, audio, cheat/bonus selection, menu/save/setup, bonus floor and map-streaming checks (episode 1).
+- **Every stage of every episode** was started in Genesis Plus GX through the menu (episode chosen with A, stage with the cheat) and screenshotted after walking right: all 66 draw their own tiles, sprites, HUD and player.
+- **Planet approaches** for episodes 1 and 2, **bonus levels** from episodes 2 and 5 (their own maps, gem counts and timers) and the **episode 3 ending** (stills with text, animation, scripted timing) were checked on screen.
+- **Saves:** a game saved in episode 5 reloads into episode 5.
+- **Guardians of episodes 2-9:** a host-side bot that walks up to the guardian and fires defeats it and finishes the stage in episodes 2, 3, 4, 6, 7 and 9; in 5 and 8 the guardian sits above the bot's line of fire (the bot does not jump), so those two were not shown to be beatable.
+
+Not checked: real hardware or a flash cart (the SSF2 mapper was only exercised in Genesis Plus GX); the new episodes' music by ear; full playthroughs of episodes 2-10; per-stage frame rates for the new episodes. Known glitch: in Battleships 2 (episode 6, stage 6) a row of pickups near the start is drawn with the wrong picture.
+
+## Lite cartridge (4 MB, all episodes) — what was checked
+
+`JazzJackrabbitGenesisLite.bin`: exactly 4,194,304 bytes, no mapper; program 0.94 MB + lite packs 3.05 MB, 14 KB free.
+
+- **Every stage of every episode** (66) started through the menu in Genesis Plus GX and screenshotted after walking right: all draw their tiles, sprites, HUD and player.
+- **Text screens** (planet approach) checked; **bonus level** from episode 5's menu runs episode 1's map with its timer and gem count; **save in episode 5 / reload** returns to episode 5 (battery RAM shares $200000 with lite pack data; saving only touches it with interrupts off and the Z80 stopped).
+- RAM: the level map and event grid (32 KB) live in RAM; 3.7 KB of heap stays free after the 4 KB DMA buffer (measured on target).
+- The full cartridge's host and headless emulator suites were re-run after the shared code changes (tile-load macros, per-stage map pointer, menu cheat fix): all pass.
+
+Not checked: the level-clear, bonus-clear and ending text screens (reached only by finishing a stage or episode); how the reduced tile sets look across every stage at full size (checked at thumbnail size, and one stage close up); lite frame rate (gathering pooled tiles costs some CPU on each block and sprite-frame upload; not measured); real hardware.
+
+## Lite cartridge at 5 MB (music with drums)
+
+`JazzJackrabbitGenesisLite.bin` is now 5,242,880 bytes: program 0.90 MB and level packs 2.47 MB below `$380000`, music 1.46 MB in banks 7-9 (32 tracks, each with its PCM drums cut down to fit 53 KB).
+
+- **Right track from every music bank:** the audio of the menu (bank 7), the bonus level (bank 9) and a Holiday Hare stage (banks 7/9) was captured in Genesis Plus GX and its loudness envelope compared with the full cartridge's: correlation 0.78-0.82, i.e. the same arrangement playing at the same tempo.
+- All 66 stages started and screenshotted again (none blank); save in episode 5 and reload gives an identical screen.
+
+Not checked: the drums by ear (how much the shortened hits change the feel); the level-clear/ending screens; real hardware or flash carts with this mapper use.
+
+### Fix: corrupted jump frames and pickups in the lite cartridge
+
+Reported on Gens: Jazz's jump frames and the shootable weapon monitors were garbled. Two causes in `tools/build_lite.py`: (1) "every second frame" was applied to every multi-frame sprite, but items choose their frame by content (the ammo and 1-up monitors are frames of one set) and Jazz chooses frames by state and speed; now only enemies' walk/fly cycles are halved. (2) Jazz's tiles were capped at 75 % with nearest-colour substitution, which mixed tiles of different poses; Jazz now keeps every tile. To pay for it, tile indices are stored compactly (0.46 -> 0.33 MB) and the world tile share went from 45 % to 36 %.
+
+Checked: a jump sequence in Diamondus 2 (6 frames) and the monitors next to it now match the full cartridge frame by frame; all 66 stages start (none blank).
+
+## Original episode-selection screen
+
+NEW GAME now opens the original episode screen (list, black-on-white highlight, red for episodes the cartridge lacks, the episode's picture beside it), converted from MENU.000 / FONTMN2.0FN by `tools/build_episode_menu.py`.
+
+Checked in Genesis Plus GX on both cartridges: the screen draws all 11 rows and each picture with its own colours; UP/DOWN move the highlight and change the picture (wrapping both ways); START on an episode starts it (episode 2 -> Letni, episode 4 -> Turtemple); START on "Z bonus levels" plays a bonus level; B returns to the main menu. Host tests and the headless emulator suite (which build without the full game's data, so NEW GAME goes straight into episode 1) pass.
+
+Not checked: the red/grey "not on this cartridge" look (every build I made carries all ten episodes); the picture change costs a few frames (the picture is unpacked first), so a very quick second tap of UP/DOWN can be missed.
+
+## The 5 MB cartridge becomes the only one (full version removed)
+
+Reported: the 31 MB full cartridge failed on most emulators tried; the 5 MB lite one worked. The full version was removed and the lite build is now what `make` produces as `JazzJackrabbitGenesis.bin`:
+
+- `#ifdef JAZZ_LITE` branches made unconditional and the full-only code deleted (pack switching, the aux packs, the cutscene players, the picture-based instruction/order pages); `res_lite/` became `res/`; the startup/clear/planet/ending/menu-page assets and their converters and tests removed; `tools/build_lite.py` renamed `tools/build_cartridge.py`; `tools/build_packs.py` now only converts and links the episodes for it.
+- The music conversion is cached in `packs/music` (gitignored) so `make clean` does not need the game files again.
+- Tests updated to the cartridge's flow (no startup animation: the title appears at boot, so the scripted runs no longer press START to skip it; the instruction/order checks look for one text page each). Scene and presentation emulator tests that exercised the removed animations were deleted.
+
+Checked: host tests pass; the headless emulator suite passes on the new build (self-test, scripted playthrough, music, cheat/bonus selection, menus/saves/setup, bonus floor, map streaming). The built all-episodes cartridge is the same program as the lite one delivered before, apart from the text of the instructions/order pages.

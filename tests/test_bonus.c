@@ -17,14 +17,16 @@ static u8 *load(const char *dir, const char *name, size_t n)
 
 int main(int argc, char **argv)
 {
+    /* argv[1]: the shared floor tiles and masks; argv[2]: the episode's maps */
     const char *dir = argc > 1 ? argv[1] : "res/bonus";
+    const char *maps = argc > 2 ? argv[2] : "packs/ep1";
     u8 *tiles = load(dir, "tiles.bin", 61440), *masks = load(dir, "masks.bin", 3840);
     int lv;
     for (lv = 0; lv < BONUS_LEVELS; lv++) {
         char g[32], e[32]; BonusGame b; int i, gemCells = 0, steps, r;
         u8 *grid, *events; u8 gemId = 0, clockId = 0, exitId = 0;
-        snprintf(g, sizeof g, "grid%d.bin", lv); snprintf(e, sizeof e, "events%d.bin", lv);
-        grid = load(dir, g, 65536); events = load(dir, e, 65536);
+        snprintf(g, sizeof g, "bonus_grid%d.bin", lv); snprintf(e, sizeof e, "bonus_events%d.bin", lv);
+        grid = load(maps, g, 65536); events = load(maps, e, 65536);
         bonus_init(&b, (u8)lv, tiles, masks, grid, events);
         for (i = 1; i < 16; i++) {
             if (b.evUsed[i] && b.evType[i] == 2) gemId = (u8)i;

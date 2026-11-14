@@ -59,6 +59,11 @@ enum {
     JJ1_ITEM_DIAMOND         /* modifier 37: bonus diamond (unlocks the bonus level) */
 };
 
+/* Enemy param bit: an episode guardian (modifier 8): defeating it ends the level. */
+#define JJ1_PARAM_GUARDIAN 0x80
+/* Enemy param bit: never moves (movement 0). */
+#define JJ1_PARAM_STATIONARY 0x40
+
 typedef struct {
     u8 klass;                /* JJ1_CLASS_* */
     u8 param;                /* item kind, or spring/tube magnitude */
